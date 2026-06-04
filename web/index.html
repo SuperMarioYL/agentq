@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0b0f17">
+  <title>agentq triage</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>agentq</h1>
+    <div id="status" class="status idle">connecting…</div>
+  </header>
+  <main id="queue" aria-live="polite"></main>
+  <template id="card-tpl">
+    <article class="card">
+      <div class="card__meta">
+        <span class="agent"></span>
+        <time class="time"></time>
+      </div>
+      <p class="prompt"></p>
+      <pre class="context"></pre>
+      <div class="choices"></div>
+    </article>
+  </template>
+  <script src="app.js" defer></script>
+</body>
+</html>
