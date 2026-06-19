@@ -54,19 +54,23 @@ agentq attach --token <paste token>
 
 Scan the QR, tap Approve, the wrapped agent unblocks. First approval in well under two minutes on a fresh box.
 
-## Demo
+## <img src="https://api.iconify.design/tabler:photo.svg?color=%230071E3&width=24" height="22" align="absmiddle" alt=""> Demo
 
-> 📼 Demo gif being recorded (script lives at [assets/demo.tape](./assets/demo.tape)). Once captured it lands here as `![demo](assets/demo.gif)`.
+![demo](assets/demo.gif)
 
-## Architecture
+> The gif is rendered automatically by CI ([`.github/workflows/demo.yml`](./.github/workflows/demo.yml)) running [vhs](https://github.com/charmbracelet/vhs) on the script in [docs/demo.tape](./docs/demo.tape).
 
-```text
-  [claude #1] ─┐
-  [claude #2] ─┤   stdio intercept    ┌──────────────┐    WebSocket    ┌─────────┐
-  [claude #3] ─┼──> agentq wrap  ───> │ agentq serve │  <───────────>  │ phone UI│
-  [claude #4] ─┘    (per agent)       │  bbolt store │                 │  (QR)   │
-                                      └──────────────┘
-```
+## <img src="https://api.iconify.design/tabler:topology-star-3.svg?color=%230071E3&width=24" height="22" align="absmiddle" alt=""> Architecture
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="./assets/atlas-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="./assets/atlas-light.svg">
+    <img src="./assets/atlas-light.svg" width="880" alt="N Claude Code sessions each wrapped by agentq wrap emit ApprovalEnvelopes over stdio into the local agentq serve daemon (bbolt store, HTTP + WebSocket on 127.0.0.1:7777); agentq attach prints a QR so the phone web UI drains the queue and sends answers back">
+  </picture>
+</p>
+
+Each Claude Code session is wrapped by `agentq wrap` — a thin pty + stdio sniffer that detects approval prompts and emits them as `ApprovalEnvelope` JSON to the local `agentq serve` daemon. The daemon orders envelopes by ULID into a one-at-a-time queue, persists them in bbolt, and serves HTTP, WebSocket, and the embedded SPA on `127.0.0.1:7777`. `agentq attach` resolves your LAN IP and prints a QR; scan it from your phone to drain the queue, and every answer streams back over WebSocket to unblock the matching agent — all on your own machine, with no Docker, no SaaS, and no external database.
 
 All three processes run on your own machine:
 - `agentq wrap` is a thin pty + stdio sniffer that detects approval prompts and emits `ApprovalEnvelope` JSON;

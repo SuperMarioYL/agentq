@@ -54,19 +54,23 @@ agentq attach --token <粘 token>
 
 扫码、点 Approve、Agent 解锁——首次审批一般在两分钟以内完成。
 
-## 演示
+## <img src="https://api.iconify.design/tabler:photo.svg?color=%230071E3&width=24" height="22" align="absmiddle" alt=""> 演示
 
-> 📼 演示动图正在录制中（见 [assets/demo.tape](./assets/demo.tape) 的脚本）。落地后会出现在这里：`![demo](assets/demo.gif)`。
+![demo](assets/demo.gif)
 
-## 架构
+> 动图由 CI（[`.github/workflows/demo.yml`](./.github/workflows/demo.yml)）用 [vhs](https://github.com/charmbracelet/vhs) 渲染脚本 [docs/demo.tape](./docs/demo.tape) 自动产出。
 
-```text
-  [claude #1] ─┐
-  [claude #2] ─┤   stdio 拦截    ┌──────────────┐    WebSocket    ┌─────────┐
-  [claude #3] ─┼──> agentq wrap  ──>│ agentq serve │ <───────────>  │ 手机 UI │
-  [claude #4] ─┘    （每会话）     │  bbolt 存储  │                 │ (扫码)  │
-                                    └──────────────┘
-```
+## <img src="https://api.iconify.design/tabler:topology-star-3.svg?color=%230071E3&width=24" height="22" align="absmiddle" alt=""> 架构
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="./assets/atlas-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="./assets/atlas-light.svg">
+    <img src="./assets/atlas-light.svg" width="880" alt="N 个 Claude Code 会话各被 agentq wrap 套住，通过 stdio 把 ApprovalEnvelope 上报给本地 agentq serve 守护进程（bbolt 存储，127.0.0.1:7777 上的 HTTP + WebSocket）；agentq attach 打印二维码，手机端网页 UI 排空队列并把答复回传">
+  </picture>
+</p>
+
+每个 Claude Code 会话被 `agentq wrap`（很薄的 pty + stdio 嗅探器）套住，识别审批提示后以 `ApprovalEnvelope` JSON 上报给本地的 `agentq serve` 守护进程。守护进程把信封按 ULID 顺序排成一个一次只放一个的队列，用 bbolt 持久化，并在 `127.0.0.1:7777` 上同时提供 HTTP、WebSocket 与内嵌 SPA。`agentq attach` 算出本机 LAN IP 打印二维码，手机扫码后即可排空队列，每条答复沿 WebSocket 回传解锁对应的 Agent——全程在你自己的机器上，没有 Docker、没有 SaaS、没有外部数据库。
 
 三个进程都跑在你自己的机器上：
 - `agentq wrap`：很薄的 pty + stdio 嗅探器，识别 Agent 的审批提示，按 `ApprovalEnvelope` JSON 上报；
