@@ -9,7 +9,7 @@
 <p align="center">
   <a href="./LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-6ea8ff?style=flat-square"></a>
   <a href="https://go.dev/"><img alt="Go 1.24" src="https://img.shields.io/badge/go-1.24-00ADD8?style=flat-square&logo=go&logoColor=white"></a>
-  <a href="https://github.com/SuperMarioYL/agentq/releases"><img alt="status" src="https://img.shields.io/badge/release-v0.1.0--wip-amber?style=flat-square"></a>
+  <a href="https://github.com/SuperMarioYL/agentq/releases"><img alt="status" src="https://img.shields.io/badge/release-v0.2.0-51d1a3?style=flat-square"></a>
   <a href="#"><img alt="Claude Code" src="https://img.shields.io/badge/Claude%20Code-ready-7c5cff?style=flat-square"></a>
   <a href="#"><img alt="Agent" src="https://img.shields.io/badge/Agent-N%3A1-51d1a3?style=flat-square"></a>
 </p>
@@ -47,8 +47,10 @@ agentq serve
 
 # 每个 Agent 终端：用 wrap 套住 Agent
 agentq wrap -- claude
+# Cursor / Aider 等用括号式 (Y)es/(N)o 提示的 Agent：
+agentq wrap --agent cursor -- cursor-agent   # --agent 默认 auto，同时识别两种提示
 
-# 桌面终端：打印手机扫码
+# 桌面终端：打印手机扫码（LAN IP 选错时用 --ip 手动指定）
 agentq attach --token <粘 token>
 ```
 
@@ -122,8 +124,8 @@ agentq attach --token <粘 token>
 - [x] m1：wrap 单 Agent，stdout/stdin 驱动
 - [x] m2：N 个 wrap → 一个 daemon，bbolt 持久化，REST + WS
 - [x] m3：手机端响应式 SPA + 终端二维码
-- [ ] v0.2：Windows 支持；Cursor / Codex 适配器（社区 PR 友好）
-- [ ] v0.3：`Team` 模式（共享队列 + 审计日志），按需付费
+- [x] v0.2：Cursor / Aider 适配器（`agentq wrap --agent cursor`）；修复审批竞态丢失、ULID 非单调乱序、attach 选错 LAN IP 三个缺陷
+- [ ] v0.3：Windows 支持；`Team` 模式（共享队列 + 审计日志），按需付费
 
 ## 协议与贡献
 

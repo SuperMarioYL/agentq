@@ -114,6 +114,63 @@ func TestQueue_WaitUnknownID(t *testing.T) {
 	}
 }
 
+// TestQueue_AnswerAfterTimeoutReturnsNotFound guards the lost-answer race:
+// once Wait has timed out and released the slot, a late Answer must report
+// ErrNotFound so the HTTP layer replies 202 (persisted-for-audit) instead of
+// a false 200. Previously Answer buffered into the orphaned channel and
+// returned nil, telling the phone the approval landed while the wrapper had
+// already aborted with a 504.
+func TestQueue_AnswerAfterTimeoutReturnsNotFound(t *testing.T) {
+	q := NewQueue()
+	env := &protocol.ApprovalEnvelope{ID: "01RACE", AgentID: "a", Prompt: "p"}
+	if err := q.Register(env); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := q.Wait(ctx, env.ID); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Wait err=%v want context.Canceled", err)
+	}
+	if q.Pending(env.ID) {
+		t.Fatal("expected waiter released after timeout")
+	}
+	// The late answer must not be silently buffered into a dead slot.
+	err := q.Answer(protocol.Answer{EnvelopeID: env.ID, ChoiceKey: "y"})
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Answer err=%v want ErrNotFound (raced past Wait timeout)", err)
+	}
+}
+
+// TestQueue_AnswerBufferedBeforeTimeoutIsHonored covers the other side of the
+// race: an Answer that delivered into the channel just before ctx fired must
+// still be returned to the caller, not dropped, so a real approval is never
+// lost when the timeout and the answer land in the same instant.
+func TestQueue_AnswerBufferedBeforeTimeoutIsHonored(t *testing.T) {
+	q := NewQueue()
+	env := &protocol.ApprovalEnvelope{ID: "01HONOR", AgentID: "a", Prompt: "p"}
+	if err := q.Register(env); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	// Deliver the answer first (buffered into the cap-1 channel), then call
+	// Wait with an already-cancelled ctx. Wait must drain the buffered answer
+	// rather than reporting the cancellation.
+	if err := q.Answer(protocol.Answer{EnvelopeID: env.ID, ChoiceKey: "a"}); err != nil {
+		t.Fatalf("Answer: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	ans, err := q.Wait(ctx, env.ID)
+	if err != nil {
+		t.Fatalf("Wait err=%v want buffered answer honored", err)
+	}
+	if ans.ChoiceKey != "a" {
+		t.Fatalf("ChoiceKey=%q want %q", ans.ChoiceKey, "a")
+	}
+	if q.Pending(env.ID) {
+		t.Fatal("expected waiter released after draining buffered answer")
+	}
+}
+
 func TestQueue_SubscribeBroadcast(t *testing.T) {
 	q := NewQueue()
 	ch, cancel := q.Subscribe()

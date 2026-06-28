@@ -9,7 +9,7 @@
 <p align="center">
   <a href="./LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-6ea8ff?style=flat-square"></a>
   <a href="https://go.dev/"><img alt="Go 1.24" src="https://img.shields.io/badge/go-1.24-00ADD8?style=flat-square&logo=go&logoColor=white"></a>
-  <a href="https://github.com/SuperMarioYL/agentq/releases"><img alt="status" src="https://img.shields.io/badge/release-v0.1.0--wip-amber?style=flat-square"></a>
+  <a href="https://github.com/SuperMarioYL/agentq/releases"><img alt="status" src="https://img.shields.io/badge/release-v0.2.0-51d1a3?style=flat-square"></a>
   <a href="#"><img alt="Claude Code" src="https://img.shields.io/badge/Claude%20Code-ready-7c5cff?style=flat-square"></a>
   <a href="#"><img alt="Coding Agent" src="https://img.shields.io/badge/Coding%20Agent-N%3A1-51d1a3?style=flat-square"></a>
 </p>
@@ -47,8 +47,10 @@ agentq serve
 
 # Each agent terminal: wrap the agent
 agentq wrap -- claude
+# For Cursor / Aider and other (Y)es/(N)o-style prompts:
+agentq wrap --agent cursor -- cursor-agent   # --agent defaults to auto (both dialects)
 
-# Desktop terminal: print a QR for your phone
+# Desktop terminal: print a QR for your phone (use --ip if the auto-picked LAN IP is wrong)
 agentq attach --token <paste token>
 ```
 
@@ -124,8 +126,8 @@ Different ends of the same plumbing — both worth running.
 - [x] m1: wrap one agent, stdout/stdin driven
 - [x] m2: N wrappers → one daemon, bbolt-backed, REST + WS
 - [x] m3: phone-first responsive SPA + terminal QR
-- [ ] v0.2: Windows support; Cursor / Codex adapters (community PRs welcome)
-- [ ] v0.3: `Team` mode — shared queue across an eng squad + audit log (paid tier candidate)
+- [x] v0.2: Cursor / Aider adapter (`agentq wrap --agent cursor`); fixes for the lost-approval race, non-monotonic ULID ordering, and attach picking an unreachable LAN IP
+- [ ] v0.3: Windows support; `Team` mode — shared queue across an eng squad + audit log (paid tier candidate)
 
 ## License & contributing
 

@@ -20,6 +20,7 @@ func TestNewWrapCmd_FlagsAndDefaults(t *testing.T) {
 		{"agent-id flag", "agent-id", ""},
 		{"envelope-out flag", "envelope-out", ""},
 		{"answer-in flag", "answer-in", ""},
+		{"agent flag", "agent", "auto"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

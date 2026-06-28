@@ -25,6 +25,25 @@ type WrapOptions struct {
 	EnvelopeOut string
 	AnswerIn    string
 	Expiry      time.Duration
+	// Agent selects the prompt dialect to recognize: "claude" (default,
+	// bracketed "[y/n]" form), "cursor"/"aider" (parenthesized "(Y)es/(N)o"
+	// form), or "auto" (try both). All emit the same ApprovalEnvelope.
+	Agent string
+}
+
+// matchersForAgent maps the --agent value to the PromptMatcher set the
+// wrapper should run. Unknown values fall back to "auto" so a typo never
+// silently drops all prompts. "auto" runs the Claude matcher first (it
+// requires a slash, so it won't steal Cursor/Aider lines) then the Cursor one.
+func matchersForAgent(agent string) []wrapper.PromptMatcher {
+	switch wrapper.NormalizeAgent(agent) {
+	case "claude":
+		return []wrapper.PromptMatcher{wrapper.DefaultMatcher}
+	case "cursor", "aider":
+		return []wrapper.PromptMatcher{wrapper.CursorMatcher}
+	default: // "auto"
+		return []wrapper.PromptMatcher{wrapper.DefaultMatcher, wrapper.CursorMatcher}
+	}
 }
 
 // NewWrapCmd builds the `wrap` subcommand. In m1 the wrapper has no
@@ -57,6 +76,8 @@ m2 daemon will speak the same wire format over HTTP+WebSocket.`,
 		"File to read Answer JSON from. Empty = stdin.")
 	cmd.Flags().DurationVar(&opts.Expiry, "expiry", protocol.DefaultExpiry,
 		"How long each envelope is valid without a reply.")
+	cmd.Flags().StringVar(&opts.Agent, "agent", "auto",
+		"Prompt dialect to recognize: claude (bracketed [y/n]), cursor/aider (parenthesized (Y)es/(N)o), or auto (both).")
 	return cmd
 }
 
@@ -85,6 +106,7 @@ func RunWrap(parent context.Context, opts WrapOptions, args []string, stdout, st
 	w := &wrapper.Wrapper{
 		Cmd:         args,
 		AgentID:     opts.AgentID,
+		Matchers:    matchersForAgent(opts.Agent),
 		EnvelopeOut: envOut,
 		AnswerIn:    ansIn,
 		Stdout:      stdout,

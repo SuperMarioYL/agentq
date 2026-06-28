@@ -7,8 +7,43 @@ project loosely follows [SemVer](https://semver.org).
 ## [Unreleased]
 
 - Windows support (m1 wrapper currently relies on Unix pty)
-- Cursor / Codex / Aider adapters via the public `ApprovalEnvelope` schema
 - `agentq wrap --daemon` first-class integration with the serve daemon
+
+## [0.2.0] - 2026-06-29
+
+Reliability + reach release: three correctness fixes on the shipped daemon and a
+second agent runtime for the wrapper.
+
+### Added
+
+- **Cursor / Aider adapter** (`agentq wrap --agent cursor|aider`,
+  `internal/wrapper/cursor.go`) — a second `PromptMatcher` that recognizes the
+  parenthesized `(Y)es/(N)o` permission-prompt dialect used by Cursor's agent CLI
+  and Aider, emitting the same `ApprovalEnvelope` so other runtimes join the same
+  triage queue. `--agent auto` (default) recognizes both dialects; `--agent claude`
+  keeps the original bracketed `[y/n]` form. Proves the protocol generalises beyond
+  Claude Code, which was the v0.1 moat thesis.
+
+### Fixed
+
+- **Lost-approval race in the daemon queue** (`internal/daemon/queue.go`) — when an
+  answer raced a wrapper's TTL timeout, `Queue.Answer` buffered into the released
+  waiter slot and returned success, so the phone saw HTTP 200 while the wrapped
+  agent had already aborted with 504 — a silent lost approval. `Wait` now removes
+  the slot under the lock and drains any buffered answer, and `Answer` delivers
+  under the same lock; a raced answer returns `ErrNotFound`, so the HTTP layer
+  replies 202 (persisted-for-audit) instead of a false 200.
+- **Non-monotonic ULID broke queue ordering** (`internal/wrapper/stdio.go`) —
+  envelopes minted in the same millisecond drew fresh random entropy and could sort
+  out of arrival order, violating the "ULID is monotonic == queue position"
+  invariant the bbolt store relies on. `NewULID` is now a mutex-guarded monotonic
+  factory that increments the prior entropy within a millisecond.
+- **`agentq attach` picked an unreachable LAN IP** (`internal/cli/attach.go`) — the
+  first-non-loopback heuristic returned Docker/VPN/virtual-interface addresses the
+  phone couldn't reach, breaking the QR scan. `LANIP` now prefers a private-range
+  address on a physical interface, deprioritizes virtual interfaces (docker/utun/
+  tun/vbox/tailscale/…), and falls back gracefully. New `--ip` flag overrides the
+  auto-pick.
 
 ## [0.1.0] - 2026-06-04
 
@@ -50,5 +85,6 @@ First public preview. Covers the three milestones from the original MVP plan.
 - `agentq wrap` integrates with `agentq serve` via the documented stdout/stdin
   contract for now. A first-class `wrap --daemon` mode lands in v0.1.1.
 
-[Unreleased]: https://github.com/SuperMarioYL/agentq/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/SuperMarioYL/agentq/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/SuperMarioYL/agentq/releases/tag/v0.2.0
 [0.1.0]: https://github.com/SuperMarioYL/agentq/releases/tag/v0.1.0

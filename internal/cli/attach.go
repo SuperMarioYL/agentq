@@ -18,6 +18,7 @@ type AttachOptions struct {
 	TokenFile string
 	Token     string
 	Port      int
+	IP        string // explicit LAN IP override; skips auto-detection
 }
 
 // NewAttachCmd builds the `attach` subcommand.
@@ -42,6 +43,8 @@ camera to open the triage queue web UI.`,
 		"explicit token (overrides --token-file and $AGENTQ_TOKEN)")
 	cmd.Flags().IntVar(&opts.Port, "port", 7777,
 		"daemon port (only used when --daemon-url is empty)")
+	cmd.Flags().StringVar(&opts.IP, "ip", "",
+		"explicit LAN IP to advertise (skips auto-detection; use when the auto-picked address isn't reachable from your phone)")
 	return cmd
 }
 
@@ -96,9 +99,13 @@ func resolveDaemonURL(opts AttachOptions, token string) (string, error) {
 		u.RawQuery = q.Encode()
 		return u.String(), nil
 	}
-	ip, err := LANIP()
-	if err != nil {
-		return "", err
+	ip := strings.TrimSpace(opts.IP)
+	if ip == "" {
+		var err error
+		ip, err = LANIP()
+		if err != nil {
+			return "", err
+		}
 	}
 	u := url.URL{
 		Scheme:   "http",
@@ -109,13 +116,29 @@ func resolveDaemonURL(opts AttachOptions, token string) (string, error) {
 	return u.String(), nil
 }
 
-// LANIP returns the first non-loopback IPv4 address visible to
-// net.Interfaces. The phone needs to be on the same Wi-Fi to reach it.
+// virtualIfacePrefixes are interface name prefixes for adapters a phone on
+// the same Wi-Fi cannot reach: container bridges, VPN tunnels, virtualization
+// host-only nets. Picking one of these is the usual cause of an unscannable QR
+// code, so they are considered only as a last resort.
+var virtualIfacePrefixes = []string{
+	"docker", "br-", "veth", "utun", "tun", "tap", "vbox",
+	"vmnet", "vnic", "ham", "zt", "wg", "tailscale", "llw", "awdl",
+}
+
+// LANIP returns the best IPv4 address to advertise to a phone on the same
+// Wi-Fi. It prefers a private-range address (192.168/16, 10/8, 172.16/12) on
+// a physical-looking interface and only falls back to other non-loopback
+// addresses when no private one is found. Container/VPN/virtual interfaces are
+// deprioritized because their addresses are typically unreachable from the
+// phone — picking the first non-loopback IPv4 (the old behavior) routinely
+// returned a Docker bridge or VPN address and broke the QR scan.
 func LANIP() (string, error) {
 	ifaces, err := net.Interfaces()
 	if err != nil {
 		return "", fmt.Errorf("attach: list interfaces: %w", err)
 	}
+
+	var cands []ifaceCandidate
 	for _, iface := range ifaces {
 		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
 			continue
@@ -126,11 +149,59 @@ func LANIP() (string, error) {
 		}
 		for _, a := range addrs {
 			if ip := pickV4(a); ip != nil {
-				return ip.String(), nil
+				cands = append(cands, ifaceCandidate{name: iface.Name, ip: ip})
 			}
 		}
 	}
-	return "", fmt.Errorf("attach: no non-loopback IPv4 interface found")
+	if ip := bestLANIP(cands); ip != nil {
+		return ip.String(), nil
+	}
+	return "", fmt.Errorf("attach: no non-loopback IPv4 interface found (pass --ip to set one explicitly)")
+}
+
+// ifaceCandidate is one (interface name, IPv4) pair considered by bestLANIP.
+type ifaceCandidate struct {
+	name string
+	ip   net.IP
+}
+
+// bestLANIP chooses the address most likely reachable from a phone on the
+// same Wi-Fi: a private-range address on a physical interface wins outright;
+// a private address on a virtual interface is second; any other non-loopback
+// IPv4 is the last resort. Returns nil when there are no candidates. Pure +
+// dependency-free so the selection policy is unit-testable without touching
+// real host interfaces.
+func bestLANIP(cands []ifaceCandidate) net.IP {
+	var privateFallback, otherFallback net.IP
+	for _, c := range cands {
+		if c.ip == nil {
+			continue
+		}
+		priv := c.ip.IsPrivate()
+		virtual := isVirtualIface(c.name)
+		switch {
+		case priv && !virtual:
+			return c.ip
+		case priv && privateFallback == nil:
+			privateFallback = c.ip
+		case otherFallback == nil:
+			otherFallback = c.ip
+		}
+	}
+	if privateFallback != nil {
+		return privateFallback
+	}
+	return otherFallback
+}
+
+func isVirtualIface(name string) bool {
+	lower := strings.ToLower(name)
+	for _, p := range virtualIfacePrefixes {
+		if strings.HasPrefix(lower, p) {
+			return true
+		}
+	}
+	return false
 }
 
 func pickV4(a net.Addr) net.IP {

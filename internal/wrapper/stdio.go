@@ -340,21 +340,61 @@ func choiceLabel(p string) string {
 // crockfordAlpha is the Crockford base32 alphabet used by NewULID.
 const crockfordAlpha = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 
-// NewULID returns a 26-char Crockford-base32 ULID: 10 chars of 48-bit
-// millisecond timestamp followed by 16 chars of crypto-random entropy.
-// Sufficient for queue keys and envelope IDs without pulling in a
-// dependency.
+// ulidMu guards the monotonic factory state so concurrent NewULID callers
+// (multiple wrapped agents, the daemon) never mint two IDs that sort out of
+// creation order within the same millisecond.
+var (
+	ulidMu    sync.Mutex
+	ulidLastT uint64   // last 48-bit ms timestamp handed out
+	ulidLastE [10]byte // last 80-bit entropy handed out for ulidLastT
+)
+
+// NewULID returns a 26-char Crockford-base32 ULID: 48 bits of millisecond
+// timestamp followed by 80 bits of entropy. IDs are MONOTONIC — when two
+// calls land in the same millisecond the entropy is incremented by one
+// rather than redrawn, so lexicographic order always matches creation order.
+// The queue relies on this: the bbolt store lists envelopes by ascending ID
+// and treats that as chronological / queue position (see daemon.store).
+// Sufficient for queue keys and envelope IDs without pulling in a dependency.
 func NewULID() string {
+	ts := uint64(time.Now().UnixMilli()) & 0xFFFFFFFFFFFF // 48 bits
+
+	ulidMu.Lock()
+	if ts > ulidLastT {
+		// New (or first) millisecond: draw fresh entropy.
+		ulidLastT = ts
+		_, _ = rand.Read(ulidLastE[:])
+	} else {
+		// Same millisecond, or a clock that went backwards: keep the prior
+		// (monotonic) timestamp and increment the entropy so the new ID
+		// still sorts after the last one. (A backwards clock is pinned to
+		// ulidLastT, never allowed to mint a lower-sorting ID.)
+		ts = ulidLastT
+		incrementEntropy(&ulidLastE)
+	}
 	var b [16]byte
-	ts := uint64(time.Now().UnixMilli())
 	b[0] = byte(ts >> 40)
 	b[1] = byte(ts >> 32)
 	b[2] = byte(ts >> 24)
 	b[3] = byte(ts >> 16)
 	b[4] = byte(ts >> 8)
 	b[5] = byte(ts)
-	_, _ = rand.Read(b[6:])
+	copy(b[6:], ulidLastE[:])
+	ulidMu.Unlock()
+
 	return encodeCrockford(b[:])
+}
+
+// incrementEntropy adds one to the 80-bit big-endian entropy in place.
+// On the astronomically-unlikely overflow it wraps to zero, which still
+// preserves uniqueness within the practical envelope volume of one ms.
+func incrementEntropy(e *[10]byte) {
+	for i := len(e) - 1; i >= 0; i-- {
+		e[i]++
+		if e[i] != 0 {
+			return
+		}
+	}
 }
 
 func encodeCrockford(src []byte) string {

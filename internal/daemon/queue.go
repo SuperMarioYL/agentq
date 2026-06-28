@@ -68,6 +68,14 @@ func (q *Queue) Register(env *protocol.ApprovalEnvelope) error {
 // Wait blocks until either an Answer arrives via Answer or ctx is
 // cancelled. The waiter slot is released either way so a slow producer
 // cannot leak entries.
+//
+// On ctx cancellation the slot is removed under q.mu and the channel is
+// drained once: a concurrent Answer either delivered before the delete
+// (so the buffered value is returned and reported as answered) or has not
+// yet looked the waiter up (so it will find the slot gone and return
+// ErrNotFound). This closes the race where an answer was buffered into a
+// released slot, leaving the HTTP caller a false 200 while the wrapper
+// timed out.
 func (q *Queue) Wait(ctx context.Context, id string) (protocol.Answer, error) {
 	q.mu.Lock()
 	ch, ok := q.waiters[id]
@@ -80,25 +88,40 @@ func (q *Queue) Wait(ctx context.Context, id string) (protocol.Answer, error) {
 		q.release(id)
 		return ans, nil
 	case <-ctx.Done():
-		q.release(id)
-		return protocol.Answer{}, ctx.Err()
+		// Remove the slot under the lock so Answer can no longer deliver
+		// into it. If Answer already buffered a value (delivered before we
+		// grabbed the lock), honor it instead of dropping it on the floor.
+		q.mu.Lock()
+		delete(q.waiters, id)
+		q.mu.Unlock()
+		select {
+		case ans := <-ch:
+			return ans, nil
+		default:
+			return protocol.Answer{}, ctx.Err()
+		}
 	}
 }
 
 // Answer delivers ans to the waiter registered for ans.EnvelopeID and
 // broadcasts an EventAnswered. Returns ErrNotFound if no waiter exists
-// (wrapper already gave up) or ErrAlreadyAnswered if the slot was
-// already filled.
+// (wrapper already gave up / already drained on timeout) or
+// ErrAlreadyAnswered if the slot was already filled.
+//
+// The lookup, the channel send, and the EventAnswered broadcast all happen
+// under q.mu so they are atomic with respect to Wait's timeout path: once
+// Wait has removed the slot, Answer sees ok == false and returns
+// ErrNotFound rather than buffering an answer nobody will ever read.
 func (q *Queue) Answer(ans protocol.Answer) error {
 	q.mu.Lock()
+	defer q.mu.Unlock()
 	ch, ok := q.waiters[ans.EnvelopeID]
-	q.mu.Unlock()
 	if !ok {
 		return ErrNotFound
 	}
 	select {
 	case ch <- ans:
-		q.broadcast(Event{Kind: EventAnswered, Answer: &ans})
+		q.broadcastLocked(Event{Kind: EventAnswered, Answer: &ans})
 		return nil
 	default:
 		return ErrAlreadyAnswered
@@ -144,6 +167,13 @@ func (q *Queue) Subscribe() (<-chan Event, func()) {
 func (q *Queue) broadcast(ev Event) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	q.broadcastLocked(ev)
+}
+
+// broadcastLocked fans ev out to subscribers. The caller MUST already hold
+// q.mu — Answer broadcasts under the lock so delivery and the answered
+// event are atomic with respect to Wait's timeout path.
+func (q *Queue) broadcastLocked(ev Event) {
 	for ch := range q.subscribers {
 		select {
 		case ch <- ev:

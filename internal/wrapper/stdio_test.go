@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -345,5 +346,55 @@ func TestNewULID_ShapeAndUniqueness(t *testing.T) {
 			t.Fatalf("duplicate ULID %q at i=%d", u, i)
 		}
 		seen[u] = struct{}{}
+	}
+}
+
+// TestNewULID_Monotonic guards the queue-ordering invariant: IDs minted in a
+// tight loop (many within the same millisecond) must be strictly increasing
+// in lexicographic order, because the bbolt store lists envelopes by
+// ascending ID and treats that as arrival order. The pre-fix factory redrew
+// random entropy each call, so same-ms IDs sorted arbitrarily.
+func TestNewULID_Monotonic(t *testing.T) {
+	const n = 5000
+	prev := NewULID()
+	for i := 1; i < n; i++ {
+		u := NewULID()
+		if u <= prev {
+			t.Fatalf("ULID not monotonic at i=%d: %q <= %q", i, u, prev)
+		}
+		prev = u
+	}
+}
+
+// TestNewULID_ConcurrentMonotonic confirms the factory stays monotonic and
+// unique under concurrent callers (the real topology: N wrapped agents plus
+// the daemon minting IDs at once). Run with -race.
+func TestNewULID_ConcurrentMonotonic(t *testing.T) {
+	const goroutines, per = 16, 500
+	out := make(chan string, goroutines*per)
+	var wg sync.WaitGroup
+	for g := 0; g < goroutines; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < per; i++ {
+				out <- NewULID()
+			}
+		}()
+	}
+	wg.Wait()
+	close(out)
+	seen := make(map[string]struct{}, goroutines*per)
+	for u := range out {
+		if len(u) != 26 {
+			t.Fatalf("len(%q)=%d want=26", u, len(u))
+		}
+		if _, dup := seen[u]; dup {
+			t.Fatalf("duplicate ULID %q under concurrency", u)
+		}
+		seen[u] = struct{}{}
+	}
+	if len(seen) != goroutines*per {
+		t.Fatalf("got %d unique IDs want %d", len(seen), goroutines*per)
 	}
 }
