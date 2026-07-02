@@ -9,7 +9,7 @@
 <p align="center">
   <a href="./LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-6ea8ff?style=flat-square"></a>
   <a href="https://go.dev/"><img alt="Go 1.24" src="https://img.shields.io/badge/go-1.24-00ADD8?style=flat-square&logo=go&logoColor=white"></a>
-  <a href="https://github.com/SuperMarioYL/agentq/releases"><img alt="status" src="https://img.shields.io/badge/release-v0.2.0-51d1a3?style=flat-square"></a>
+  <a href="https://github.com/SuperMarioYL/agentq/releases"><img alt="status" src="https://img.shields.io/badge/release-v0.3.0-51d1a3?style=flat-square"></a>
   <a href="#"><img alt="Claude Code" src="https://img.shields.io/badge/Claude%20Code-ready-7c5cff?style=flat-square"></a>
   <a href="#"><img alt="Agent" src="https://img.shields.io/badge/Agent-N%3A1-51d1a3?style=flat-square"></a>
 </p>
@@ -89,11 +89,12 @@ agentq attach --token <粘 token>
 | `/api/queue` | GET | 列出当前未答复的 envelope，按 ULID 升序 |
 | `/api/queue/:id/answer` | POST | 提交 `{ "choice_key": "y" }` |
 | `/ws` | WebSocket | 推送 `{kind:"envelope"}` / `{kind:"answer"}` 事件，初次连接会推送当前快照 |
+| `/schema/approval-envelope.json` | GET | 无需 token，返回 `ApprovalEnvelope` 的 JSON Schema（协议契约） |
 | `/healthz` | GET | 无需 token 的存活检查 |
 
 所有 `/api` 和 `/ws` 都要求 `?t=<token>` 或 `Authorization: Bearer <token>`。
 
-`ApprovalEnvelope` 的字段在 [internal/protocol/approval.go](./internal/protocol/approval.go) 里定义；公开它是 agentq 的护城河——任何 Agent 运行时都能直接发同样的信封，绕过 stdio 拦截。
+`ApprovalEnvelope` 的字段在 [internal/protocol/approval.go](./internal/protocol/approval.go) 里定义，并以 JSON Schema 形式发布在 [docs/approval-envelope.schema.json](./docs/approval-envelope.schema.json)，运行中的守护进程也会在 `GET /schema/approval-envelope.json` 上无鉴权返回同一份契约。公开这份协议是 agentq 的护城河——任何 Agent 运行时都能对着 schema 校验自己的输出，然后直接 `POST /api/envelopes` 把信封发进队列，完全不需要 `agentq wrap` 拦截 stdio。
 
 ## 配置
 
@@ -125,7 +126,8 @@ agentq attach --token <粘 token>
 - [x] m2：N 个 wrap → 一个 daemon，bbolt 持久化，REST + WS
 - [x] m3：手机端响应式 SPA + 终端二维码
 - [x] v0.2：Cursor / Aider 适配器（`agentq wrap --agent cursor`）；修复审批竞态丢失、ULID 非单调乱序、attach 选错 LAN IP 三个缺陷
-- [ ] v0.3：Windows 支持；`Team` 模式（共享队列 + 审计日志），按需付费
+- [x] v0.3：公开 `ApprovalEnvelope` JSON Schema（`GET /schema/approval-envelope.json`）；修复重复答复覆盖审计记录、CursorMatcher 同首字母选项 key 冲突两个缺陷
+- [ ] v0.4：Windows 支持；`Team` 模式（共享队列 + 审计日志），按需付费
 
 ## 协议与贡献
 

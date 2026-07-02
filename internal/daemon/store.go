@@ -133,6 +133,51 @@ func (s *Store) PutAnswer(a *protocol.Answer) error {
 	})
 }
 
+// ErrAnswerExists is returned by PutAnswerIfAbsent when an answer for the same
+// EnvelopeID is already stored. It signals "this card was already answered" so
+// the caller can preserve the original audit record instead of overwriting it.
+var ErrAnswerExists = errors.New("daemon: answer already recorded")
+
+// PutAnswerIfAbsent stores a as the answer for a.EnvelopeID only if no answer is
+// already recorded for that envelope. If one exists it leaves the stored answer
+// untouched, decodes it into the returned *Answer, and reports ErrAnswerExists.
+//
+// The read-check-write happens inside a single bbolt read-write transaction, so
+// two concurrent answers to the same card cannot both win: exactly one persists,
+// every other one gets ErrAnswerExists with the recorded answer. This keeps the
+// audit record equal to the choice the wrapper actually acted on, closing the
+// hole where a second/racing answer (a stale reconnected tab, or a second phone
+// on the token-gated LAN) overwrote a card that had already been answered.
+func (s *Store) PutAnswerIfAbsent(a *protocol.Answer) (*protocol.Answer, error) {
+	if a == nil || a.EnvelopeID == "" {
+		return nil, errors.New("daemon: answer missing envelope_id")
+	}
+	data, err := json.Marshal(a)
+	if err != nil {
+		return nil, err
+	}
+	var existing *protocol.Answer
+	err = s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(answersBucket)
+		if raw := b.Get([]byte(a.EnvelopeID)); raw != nil {
+			var prev protocol.Answer
+			if uerr := json.Unmarshal(raw, &prev); uerr != nil {
+				return uerr
+			}
+			existing = &prev
+			return ErrAnswerExists
+		}
+		return b.Put([]byte(a.EnvelopeID), data)
+	})
+	if errors.Is(err, ErrAnswerExists) {
+		return existing, ErrAnswerExists
+	}
+	if err != nil {
+		return nil, err
+	}
+	return a, nil
+}
+
 // GetAnswer returns the stored answer for envelopeID, or ErrNotFound.
 func (s *Store) GetAnswer(envelopeID string) (*protocol.Answer, error) {
 	var out protocol.Answer

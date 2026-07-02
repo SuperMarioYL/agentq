@@ -9,7 +9,7 @@
 <p align="center">
   <a href="./LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-6ea8ff?style=flat-square"></a>
   <a href="https://go.dev/"><img alt="Go 1.24" src="https://img.shields.io/badge/go-1.24-00ADD8?style=flat-square&logo=go&logoColor=white"></a>
-  <a href="https://github.com/SuperMarioYL/agentq/releases"><img alt="status" src="https://img.shields.io/badge/release-v0.2.0-51d1a3?style=flat-square"></a>
+  <a href="https://github.com/SuperMarioYL/agentq/releases"><img alt="status" src="https://img.shields.io/badge/release-v0.3.0-51d1a3?style=flat-square"></a>
   <a href="#"><img alt="Claude Code" src="https://img.shields.io/badge/Claude%20Code-ready-7c5cff?style=flat-square"></a>
   <a href="#"><img alt="Coding Agent" src="https://img.shields.io/badge/Coding%20Agent-N%3A1-51d1a3?style=flat-square"></a>
 </p>
@@ -89,11 +89,12 @@ No Docker, no SaaS, no external database.
 | `/api/queue` | GET | List unanswered envelopes, ULID-ordered |
 | `/api/queue/:id/answer` | POST | Submit `{ "choice_key": "y" }` |
 | `/ws` | WebSocket | Streams `{kind:"envelope"}` / `{kind:"answer"}` events; pushes initial snapshot on connect |
+| `/schema/approval-envelope.json` | GET | Token-free; returns the `ApprovalEnvelope` JSON Schema (the protocol contract) |
 | `/healthz` | GET | Token-free liveness probe |
 
 Everything under `/api` and `/ws` requires `?t=<token>` or `Authorization: Bearer <token>`.
 
-`ApprovalEnvelope` is defined in [internal/protocol/approval.go](./internal/protocol/approval.go). Making this shape public is the moat: any agent runtime can emit it directly without going through stdio scraping.
+`ApprovalEnvelope` is defined in [internal/protocol/approval.go](./internal/protocol/approval.go) and published as a JSON Schema at [docs/approval-envelope.schema.json](./docs/approval-envelope.schema.json); the running daemon serves the same contract token-free at `GET /schema/approval-envelope.json`. Making this shape public is the moat: any agent runtime can validate its output against the schema and `POST /api/envelopes` conforming envelopes straight into the queue — no `agentq wrap` stdio scraping required.
 
 ## Configuration
 
@@ -127,7 +128,8 @@ Different ends of the same plumbing — both worth running.
 - [x] m2: N wrappers → one daemon, bbolt-backed, REST + WS
 - [x] m3: phone-first responsive SPA + terminal QR
 - [x] v0.2: Cursor / Aider adapter (`agentq wrap --agent cursor`); fixes for the lost-approval race, non-monotonic ULID ordering, and attach picking an unreachable LAN IP
-- [ ] v0.3: Windows support; `Team` mode — shared queue across an eng squad + audit log (paid tier candidate)
+- [x] v0.3: publish the `ApprovalEnvelope` JSON Schema (`GET /schema/approval-envelope.json`); fixes for a second/racing answer overwriting the audit record and for CursorMatcher minting duplicate choice keys on same-first-letter options
+- [ ] v0.4: Windows support; `Team` mode — shared queue across an eng squad + audit log (paid tier candidate)
 
 ## License & contributing
 

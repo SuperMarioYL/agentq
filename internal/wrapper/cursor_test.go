@@ -67,6 +67,57 @@ func TestCursorMatcher_IgnoresNonPrompts(t *testing.T) {
 	}
 }
 
+// TestCursorMatcher_DisambiguatesCollidingKeys guards fix-cursor-choice-key-collision:
+// when two options share a first letter (e.g. "(A)ll/(A)bort"), the matcher must NOT
+// mint two choices with the same key — otherwise answer resolution matches the first
+// and silently fires the wrong option. Every emitted key must be unique.
+func TestCursorMatcher_DisambiguatesCollidingKeys(t *testing.T) {
+	env, ok := CursorMatcher("Apply all pending edits? (A)ll/(A)bort/(S)kip", "")
+	if !ok || env == nil {
+		t.Fatal("expected match for colliding-key prompt")
+	}
+	if len(env.Choices) != 3 {
+		t.Fatalf("got %d choices, want 3: %+v", len(env.Choices), env.Choices)
+	}
+	seen := map[string]bool{}
+	for _, c := range env.Choices {
+		if c.Key == "" {
+			t.Errorf("empty choice key in %+v", env.Choices)
+		}
+		if seen[c.Key] {
+			t.Fatalf("duplicate choice key %q in %+v", c.Key, env.Choices)
+		}
+		seen[c.Key] = true
+	}
+	// The first "(A)ll" keeps the natural letter key; "(A)bort" falls back to its word.
+	if env.Choices[0].Key != "a" {
+		t.Errorf("first choice key=%q want a", env.Choices[0].Key)
+	}
+	if env.Choices[1].Key == "a" {
+		t.Errorf("second colliding choice must not reuse key %q", env.Choices[1].Key)
+	}
+}
+
+// TestCursorMatcher_TripleCollisionStillUnique exercises the positional-suffix
+// fallback: three options with the same first letter AND same word must all get
+// distinct keys.
+func TestCursorMatcher_TripleCollisionStillUnique(t *testing.T) {
+	env, ok := CursorMatcher("Pick? (A)pply/(A)pply/(A)pply", "")
+	if !ok || env == nil {
+		t.Fatal("expected match")
+	}
+	seen := map[string]bool{}
+	for _, c := range env.Choices {
+		if seen[c.Key] {
+			t.Fatalf("duplicate key %q among %+v", c.Key, env.Choices)
+		}
+		seen[c.Key] = true
+	}
+	if len(seen) != len(env.Choices) {
+		t.Errorf("keys not all unique: %+v", env.Choices)
+	}
+}
+
 func TestNormalizeAgent(t *testing.T) {
 	cases := map[string]string{
 		"claude":      "claude",

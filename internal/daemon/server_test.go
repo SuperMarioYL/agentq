@@ -255,3 +255,79 @@ func TestServer_Healthz(t *testing.T) {
 		t.Errorf("status=%d want 200", res.StatusCode)
 	}
 }
+
+// TestServer_SecondAnswerDoesNotOverwriteAudit guards fix-double-answer-audit-overwrite:
+// once a card is answered, a second answer (a stale reconnected tab, or a second
+// phone on the LAN) must NOT overwrite the stored audit record — the wrapper acted
+// on the first choice. The endpoint returns 409 with the ORIGINAL answer, and the
+// persisted answer is unchanged.
+func TestServer_SecondAnswerDoesNotOverwriteAudit(t *testing.T) {
+	ts, store := newTestServer(t, "")
+	_ = store.PutEnvelope(&protocol.ApprovalEnvelope{
+		ID: "dup-1", AgentID: "a", Prompt: "p",
+		Choices: []protocol.Choice{{Key: "y"}, {Key: "n"}},
+	})
+
+	// First answer: y. No waiter is registered (no in-flight wrapper), so the
+	// handler persists for audit and the queue reports the wrapper already gone.
+	res1, err := http.Post(ts.URL+"/api/queue/dup-1/answer",
+		"application/json", strings.NewReader(`{"choice_key":"y"}`))
+	if err != nil {
+		t.Fatalf("first answer: %v", err)
+	}
+	res1.Body.Close()
+	if res1.StatusCode != http.StatusAccepted {
+		t.Fatalf("first answer status=%d want 202", res1.StatusCode)
+	}
+
+	// Second answer: n. Must be rejected as already-answered and must NOT overwrite.
+	res2, err := http.Post(ts.URL+"/api/queue/dup-1/answer",
+		"application/json", strings.NewReader(`{"choice_key":"n"}`))
+	if err != nil {
+		t.Fatalf("second answer: %v", err)
+	}
+	defer res2.Body.Close()
+	if res2.StatusCode != http.StatusConflict {
+		t.Fatalf("second answer status=%d want 409", res2.StatusCode)
+	}
+	var returned protocol.Answer
+	if err := json.NewDecoder(res2.Body).Decode(&returned); err != nil {
+		t.Fatalf("decode 409 body: %v", err)
+	}
+	if returned.ChoiceKey != "y" {
+		t.Errorf("409 returned ChoiceKey=%q; want the original y", returned.ChoiceKey)
+	}
+
+	// The persisted audit record must still be the first choice.
+	stored, err := store.GetAnswer("dup-1")
+	if err != nil {
+		t.Fatalf("GetAnswer: %v", err)
+	}
+	if stored.ChoiceKey != "y" {
+		t.Errorf("audit record overwritten: ChoiceKey=%q want y", stored.ChoiceKey)
+	}
+}
+
+// TestServer_SchemaEndpoint guards m5_public_envelope_schema: the ApprovalEnvelope
+// JSON Schema is served unauthenticated and is valid JSON describing the envelope.
+func TestServer_SchemaEndpoint(t *testing.T) {
+	ts, _ := newTestServer(t, "secret") // token set, but the schema route is public
+	res, err := http.Get(ts.URL + "/schema/approval-envelope.json")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d want 200 (schema must be public)", res.StatusCode)
+	}
+	if ct := res.Header.Get("Content-Type"); !strings.Contains(ct, "schema+json") {
+		t.Errorf("Content-Type=%q want application/schema+json", ct)
+	}
+	var doc map[string]any
+	if err := json.NewDecoder(res.Body).Decode(&doc); err != nil {
+		t.Fatalf("schema is not valid JSON: %v", err)
+	}
+	if doc["title"] != "ApprovalEnvelope" {
+		t.Errorf("schema title=%v want ApprovalEnvelope", doc["title"])
+	}
+}

@@ -120,6 +120,45 @@ func TestStore_AnswerRoundTrip(t *testing.T) {
 	}
 }
 
+func TestStore_PutAnswerIfAbsentIsCreateOnly(t *testing.T) {
+	s := newTestStore(t)
+	first := &protocol.Answer{EnvelopeID: "01", ChoiceKey: "y", AnsweredAt: time.Now().UTC()}
+	stored, err := s.PutAnswerIfAbsent(first)
+	if err != nil {
+		t.Fatalf("first PutAnswerIfAbsent: %v", err)
+	}
+	if stored.ChoiceKey != "y" {
+		t.Fatalf("first store ChoiceKey=%q want y", stored.ChoiceKey)
+	}
+
+	// A second answer to the SAME envelope must not overwrite; it must report
+	// ErrAnswerExists and hand back the ORIGINAL answer, not the new one.
+	second := &protocol.Answer{EnvelopeID: "01", ChoiceKey: "n", AnsweredAt: time.Now().UTC()}
+	got, err := s.PutAnswerIfAbsent(second)
+	if !errors.Is(err, ErrAnswerExists) {
+		t.Fatalf("second PutAnswerIfAbsent err=%v want ErrAnswerExists", err)
+	}
+	if got == nil || got.ChoiceKey != "y" {
+		t.Fatalf("returned answer=%+v; want the original ChoiceKey=y", got)
+	}
+
+	// The persisted record must still be the first choice.
+	onDisk, err := s.GetAnswer("01")
+	if err != nil {
+		t.Fatalf("GetAnswer: %v", err)
+	}
+	if onDisk.ChoiceKey != "y" {
+		t.Errorf("stored answer overwritten: ChoiceKey=%q want y", onDisk.ChoiceKey)
+	}
+}
+
+func TestStore_PutAnswerIfAbsentMissingID(t *testing.T) {
+	s := newTestStore(t)
+	if _, err := s.PutAnswerIfAbsent(&protocol.Answer{ChoiceKey: "y"}); err == nil {
+		t.Fatal("expected error for answer without envelope_id")
+	}
+}
+
 func TestStore_ReopenPreservesData(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "queue.db")

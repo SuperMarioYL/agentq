@@ -124,6 +124,13 @@ func (s *Server) routes() {
 	s.e.GET("/healthz", func(c echo.Context) error {
 		return c.JSON(http.StatusOK, map[string]string{"status": "ok"})
 	})
+	// Publish the ApprovalEnvelope JSON Schema unauthenticated: making the wire
+	// format publicly fetchable is the protocol moat — a third-party runtime can
+	// GET this, validate its own output, and POST conforming envelopes to
+	// /api/envelopes without any agentq wrapper.
+	s.e.GET("/schema/approval-envelope.json", func(c echo.Context) error {
+		return c.Blob(http.StatusOK, protocol.ApprovalEnvelopeSchemaContentType, protocol.ApprovalEnvelopeSchema)
+	})
 	s.mountStatic()
 }
 
@@ -230,7 +237,16 @@ func (s *Server) answerEnvelope(c echo.Context) error {
 		ChoiceKey:  body.ChoiceKey,
 		AnsweredAt: time.Now().UTC(),
 	}
-	if err := s.cfg.Store.PutAnswer(&ans); err != nil {
+	// Persist create-only: the FIRST answer to a card is the audit record, and a
+	// later/racing answer (a stale reconnected tab, or a second phone on the LAN)
+	// must NOT overwrite it — the wrapper already acted on the first choice. If an
+	// answer is already recorded, keep it and report the original, not this one.
+	stored, err := s.cfg.Store.PutAnswerIfAbsent(&ans)
+	if err != nil {
+		if errors.Is(err, ErrAnswerExists) {
+			// Already answered earlier; surface the recorded answer verbatim.
+			return c.JSON(http.StatusConflict, stored)
+		}
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
 	if err := s.cfg.Queue.Answer(ans); err != nil {

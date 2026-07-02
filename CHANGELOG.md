@@ -9,6 +9,37 @@ project loosely follows [SemVer](https://semver.org).
 - Windows support (m1 wrapper currently relies on Unix pty)
 - `agentq wrap --daemon` first-class integration with the serve daemon
 
+## [0.3.0] - 2026-07-02
+
+Protocol + integrity release: the `ApprovalEnvelope` wire format is now published
+as a fetchable JSON Schema so any runtime can join the queue, plus two correctness
+fixes on the answer path and the Cursor/Aider adapter.
+
+### Added
+
+- **Published `ApprovalEnvelope` JSON Schema** (`docs/approval-envelope.schema.json`,
+  served unauthenticated at `GET /schema/approval-envelope.json` via
+  `internal/protocol/schema.go`) — a third-party agent runtime can fetch the schema,
+  validate its own output, and `POST /api/envelopes` conforming envelopes directly
+  into the triage queue with no `agentq wrap` matcher. Publishing the wire format is
+  the protocol moat; a struct↔schema lockstep test fails the build if they drift.
+
+### Fixed
+
+- **Answer audit record no longer overwritten by a second/racing answer**
+  (`internal/daemon/server.go`, `internal/daemon/store.go`) — `answerEnvelope`
+  persisted the answer before checking queue state, so a second answer to an
+  already-answered card (a stale reconnected tab, or a second phone on the LAN)
+  overwrote the stored audit answer while the wrapper had already acted on the
+  first choice. Answers are now persisted create-only via `PutAnswerIfAbsent`
+  (atomic under one bbolt transaction); a repeat answer returns `409 Conflict` with
+  the original recorded answer and leaves the audit record intact.
+- **CursorMatcher no longer mints duplicate choice keys** (`internal/wrapper/cursor.go`)
+  — a Cursor/Aider prompt whose options share a first letter (`(A)ll/(A)bort`,
+  `(Y)es/(Y)ield`) produced two `Choice` entries with the same key, so answer
+  resolution silently fired the wrong option. Colliding keys now fall back to the
+  option's full word, then a positional suffix, so every choice is uniquely answerable.
+
 ## [0.2.0] - 2026-06-29
 
 Reliability + reach release: three correctness fixes on the shipped daemon and a

@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/SuperMarioYL/agentq/docs/approval-envelope.schema.json",
+  "title": "ApprovalEnvelope",
+  "description": "The agentq wire format for a single agent permission prompt surrendered to an out-of-band human reviewer. Any agent runtime that emits this shape can POST it to the daemon (POST /api/envelopes) and participate in the same triage queue without going through agentq's stdio wrapper. Making this envelope public is the product's moat: adoption no longer requires agentq's own matchers.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "agent_id", "prompt", "choices"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "A ULID assigned by the producer. Monotonic within a producer, so it also serves as the queue position and the daemon storage key. 26-char Crockford base32.",
+      "minLength": 1,
+      "examples": ["01JZ8YQ9F0K3M7V2N4P6R8T0AB"]
+    },
+    "agent_id": {
+      "type": "string",
+      "description": "A producer-assigned label like \"claude-tab3\" used to disambiguate which session is waiting.",
+      "minLength": 1
+    },
+    "session_started": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC 3339 timestamp of when the wrapped agent process was launched. Optional; omit or send the zero value if unknown."
+    },
+    "prompt": {
+      "type": "string",
+      "description": "The human-readable question, e.g. \"Allow bash command `rm -rf node_modules`?\".",
+      "minLength": 1
+    },
+    "context": {
+      "type": "string",
+      "description": "The last ~20 lines of agent stdout for situational awareness. Truncated to 4096 bytes (MaxContextBytes) by the producer."
+    },
+    "choices": {
+      "type": "array",
+      "description": "The response options offered by the agent. At least one is required; exactly one SHOULD be marked is_default=true (matching the agent's own default), and every key MUST be unique within the array so answers resolve unambiguously.",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/choice" }
+    },
+    "expires_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC 3339 timestamp when the producer will give up waiting and abort the prompt. The daemon SHOULD NOT accept answers past this time. Optional."
+    }
+  },
+  "$defs": {
+    "choice": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "label"],
+      "properties": {
+        "key": {
+          "type": "string",
+          "description": "The short identifier echoed back to the agent (e.g. \"y\", \"n\", \"always\"). MUST be unique among the envelope's choices.",
+          "minLength": 1
+        },
+        "label": {
+          "type": "string",
+          "description": "The human-readable button text (e.g. \"Approve\", \"Deny\", \"Approve and remember\").",
+          "minLength": 1
+        },
+        "is_default": {
+          "type": "boolean",
+          "description": "Marks the choice that fires on Enter or on expiry. The web UI highlights it and the wrapper picks it on timeout.",
+          "default": false
+        }
+      }
+    }
+  }
+}

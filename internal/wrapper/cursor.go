@@ -2,6 +2,7 @@ package wrapper
 
 import (
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/SuperMarioYL/agentq/internal/protocol"
@@ -68,9 +69,10 @@ func CursorMatcher(line, _ string) (*protocol.ApprovalEnvelope, bool) {
 
 	var choices []protocol.Choice
 	anyDefault := false
+	seen := map[string]int{} // key -> index of the first choice that claimed it
 	for _, om := range cursorOptionRE.FindAllStringSubmatch(optsRun, -1) {
-		key := strings.ToLower(om[1])
 		word := strings.TrimSpace(om[1] + om[2]) // "Y"+"es" => "Yes"
+		key := disambiguateKey(strings.ToLower(om[1]), word, seen)
 		isDefault := defaultLabel != "" &&
 			strings.EqualFold(word, defaultLabel)
 		if isDefault {
@@ -91,6 +93,51 @@ func CursorMatcher(line, _ string) (*protocol.ApprovalEnvelope, bool) {
 		choices[0].IsDefault = true
 	}
 	return &protocol.ApprovalEnvelope{Prompt: prompt, Choices: choices}, true
+}
+
+// disambiguateKey returns a choice key that is unique within one prompt. The
+// natural key is the lowercase parenthesized letter-run (e.g. "y" from "(Y)es"),
+// but Cursor/Aider prompts routinely offer two options that share a first letter
+// — "(A)ll/(A)bort", "(Y)es/(Y)ield" — which would mint two protocol.Choice
+// entries with the same Key. Answer resolution (server.choiceKnown /
+// wrapper.choiceExists) matches the FIRST choice with a given key, so a collision
+// silently fires the wrong option. To keep every choice answerable, on collision
+// we fall back to the option's normalized full word ("all"/"abort"); if THAT also
+// collides (or is empty), we append a positional suffix ("a-2"). seen tracks the
+// keys already handed out for this prompt.
+func disambiguateKey(letterKey, word string, seen map[string]int) string {
+	pick := func(k string) (string, bool) {
+		if k == "" {
+			return "", false
+		}
+		if _, taken := seen[k]; taken {
+			return "", false
+		}
+		seen[k] = len(seen)
+		return k, true
+	}
+	if k, ok := pick(letterKey); ok {
+		return k
+	}
+	// First letter already used: try the full normalized word.
+	if k, ok := pick(strings.ToLower(word)); ok {
+		return k
+	}
+	// Word collided too (or was empty): append a positional suffix until unique.
+	base := letterKey
+	if base == "" {
+		base = strings.ToLower(word)
+	}
+	if base == "" {
+		base = "opt"
+	}
+	for i := 2; ; i++ {
+		cand := base + "-" + strconv.Itoa(i)
+		if _, taken := seen[cand]; !taken {
+			seen[cand] = len(seen)
+			return cand
+		}
+	}
 }
 
 // cursorChoiceLabel maps a parenthesized-letter option to the same
