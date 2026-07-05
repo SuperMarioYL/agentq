@@ -9,7 +9,7 @@
 <p align="center">
   <a href="./LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-6ea8ff?style=flat-square"></a>
   <a href="https://go.dev/"><img alt="Go 1.24" src="https://img.shields.io/badge/go-1.24-00ADD8?style=flat-square&logo=go&logoColor=white"></a>
-  <a href="https://github.com/SuperMarioYL/agentq/releases"><img alt="status" src="https://img.shields.io/badge/release-v0.3.0-51d1a3?style=flat-square"></a>
+  <a href="https://github.com/SuperMarioYL/agentq/releases"><img alt="status" src="https://img.shields.io/badge/release-v0.4.0-51d1a3?style=flat-square"></a>
   <a href="#"><img alt="Claude Code" src="https://img.shields.io/badge/Claude%20Code-ready-7c5cff?style=flat-square"></a>
   <a href="#"><img alt="Agent" src="https://img.shields.io/badge/Agent-N%3A1-51d1a3?style=flat-square"></a>
 </p>
@@ -106,7 +106,7 @@ agentq attach --token <粘 token>
 | `--token` | string | 自动生成 | 客户端必须带的 bearer token |
 | `--token-out` | path | 不写 | 把 token 写到文件，`attach` 可用 `--token-file` 读 |
 
-`agentq wrap` 沿用 m1 已实现的 stdout/stdin 协议，可以通过外部桥脚本把每行 envelope POST 给守护进程；与 `wrap` 内置 daemon 模式的集成会在 v0.1.1 合入。
+`agentq wrap` 沿用 m1 已实现的 stdout/stdin 协议，可以通过外部桥脚本把每行 envelope POST 给守护进程；自 v0.4 起也可直接 `agentq wrap --daemon -- <agent>`，由 wrap 自动拉起（或复用）本地 `serve` 守护进程，一条命令搞定。
 
 ## 对比 affaan-m/everything-claude-code
 
@@ -127,7 +127,8 @@ agentq attach --token <粘 token>
 - [x] m3：手机端响应式 SPA + 终端二维码
 - [x] v0.2：Cursor / Aider 适配器（`agentq wrap --agent cursor`）；修复审批竞态丢失、ULID 非单调乱序、attach 选错 LAN IP 三个缺陷
 - [x] v0.3：公开 `ApprovalEnvelope` JSON Schema（`GET /schema/approval-envelope.json`）；修复重复答复覆盖审计记录、CursorMatcher 同首字母选项 key 冲突两个缺陷
-- [ ] v0.4：Windows 支持；`Team` 模式（共享队列 + 审计日志），按需付费
+- [x] v0.4：Windows 支持（构建标签拆分 pty/管道两条子进程路径）；`agentq wrap --daemon` 一键拉起/复用守护进程；修复已答复卡片不广播、wrap 答复读取无法取消、过期 envelope 滞留队列、回填时通知风暴四个缺陷
+- [ ] v0.5：`Team` 模式（共享队列 + 审计日志），按需付费
 
 ## 协议与贡献
 

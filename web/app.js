@@ -21,8 +21,15 @@
     return d.toLocaleTimeString();
   }
 
-  function renderEnvelope(env) {
+  // renderEnvelope adds a card for env. Pass { silent: true } to render a
+  // backlog card WITHOUT firing a browser Notification — the initial snapshot
+  // (GET /api/queue and the WebSocket bootstrap frames) can carry N pending
+  // cards, and notifying for each would fire N notifications at once every time
+  // a phone tab (re)loads. Only cards that arrive live over the WebSocket after
+  // the snapshot completes should notify.
+  function renderEnvelope(env, opts) {
     if (!env || !env.id || cards.has(env.id)) return;
+    const silent = opts && opts.silent;
     clearEmpty();
     const node = tpl.content.firstElementChild.cloneNode(true);
     node.dataset.id = env.id;
@@ -42,7 +49,7 @@
     });
     $queue.prepend(node);
     cards.set(env.id, node);
-    notify(env);
+    if (!silent) notify(env);
   }
 
   function removeCard(id) {
@@ -119,7 +126,9 @@
       const res = await fetch(`${apiBase}/queue?t=${encodeURIComponent(token)}`);
       if (res.ok) {
         const list = await res.json();
-        list.forEach(renderEnvelope);
+        // Backlog cards render SILENTLY: (re)opening the tab with N pending
+        // cards must not fire N browser notifications at once.
+        list.forEach((env) => renderEnvelope(env, { silent: true }));
       }
     } catch (_) {
       /* ws will fill in */
@@ -131,9 +140,29 @@
   function connect() {
     setStatus('connecting…', 'idle');
     const ws = new WebSocket(wsURL);
-    ws.onopen = () => setStatus('live', 'ok');
+    // The daemon replays the current queue as a burst of `envelope` frames
+    // immediately after connect (the bootstrap snapshot) before any live
+    // events. Those are backlog too — render them silently. Any card already
+    // rendered from the REST snapshot is skipped by renderEnvelope's dedupe,
+    // and a short settle window flips notifications on for genuinely-live
+    // arrivals that come after the replay.
+    let liveArmed = false;
+    let armTimer = null;
+    const armLive = () => {
+      liveArmed = true;
+      if (armTimer) {
+        clearTimeout(armTimer);
+        armTimer = null;
+      }
+    };
+    ws.onopen = () => {
+      setStatus('live', 'ok');
+      // Give the snapshot burst a moment to drain, then treat later frames as live.
+      armTimer = setTimeout(armLive, 750);
+    };
     ws.onclose = () => {
       setStatus('disconnected — retrying', 'err');
+      if (armTimer) clearTimeout(armTimer);
       setTimeout(connect, 2000);
     };
     ws.onerror = () => setStatus('error', 'err');
@@ -141,7 +170,8 @@
       try {
         const ev = JSON.parse(msg.data);
         if (ev.kind === 'envelope' && ev.envelope) {
-          renderEnvelope(ev.envelope);
+          // Notify only for live arrivals after the initial snapshot has settled.
+          renderEnvelope(ev.envelope, { silent: !liveArmed });
         } else if (ev.kind === 'answer' && ev.answer) {
           removeCard(ev.answer.envelope_id);
         }

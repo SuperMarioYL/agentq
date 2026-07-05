@@ -237,6 +237,171 @@ func TestWrapperProcess_ErrorPaths(t *testing.T) {
 	}
 }
 
+// blockingReader never returns data and never EOFs until Close is called,
+// modelling an answer source that has no answer yet — the exact condition the
+// old blocking answerDec.Decode parked on forever.
+type blockingReader struct {
+	ch chan struct{}
+}
+
+func newBlockingReader() *blockingReader { return &blockingReader{ch: make(chan struct{})} }
+
+func (b *blockingReader) Read(p []byte) (int, error) {
+	<-b.ch
+	return 0, io.EOF
+}
+
+func (b *blockingReader) Close() { close(b.ch) }
+
+// TestWrapperProcess_CtxCancelUnblocksAnswerRead guards
+// fix-wrap-answer-read-ignores-ctx-expiry-child-exit for the ctx path: while the
+// wrapper is blocked reading an answer, cancelling ctx (Ctrl-C/SIGTERM) must
+// unblock it and forward the envelope's default choice to the child instead of
+// hanging until kill -9.
+func TestWrapperProcess_CtxCancelUnblocksAnswerRead(t *testing.T) {
+	answers := newBlockingReader()
+	defer answers.Close()
+	var childIn bytes.Buffer
+
+	ctx, cancel := context.WithCancel(context.Background())
+	// Default choice is n (uppercase N in [y/N]); expect n forwarded on cancel.
+	w := &Wrapper{
+		Cmd:         []string{"x"},
+		EnvelopeOut: io.Discard,
+		AnswerIn:    answers,
+		Stdout:      io.Discard,
+		Now:         time.Now, // real clock: far-future default expiry, so the timer never fires
+		NewID:       func() string { return "ID" },
+	}
+
+	// Cancel shortly after Process starts blocking on the answer read.
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- w.Process(ctx, strings.NewReader("Allow? [y/N]\n"), &childIn)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Process did not return after ctx cancel — answer read still blocking")
+	}
+	if got := childIn.String(); got != "n\n" {
+		t.Errorf("childIn=%q want default choice n forwarded on cancel", got)
+	}
+}
+
+// TestWrapperProcess_ExpiryUnblocksAnswerRead guards the envelope-expiry path:
+// when ExpiresAt passes with no answer, the wrapper forwards the default choice
+// (the "give up and abort" contract) rather than blocking forever.
+func TestWrapperProcess_ExpiryUnblocksAnswerRead(t *testing.T) {
+	answers := newBlockingReader()
+	defer answers.Close()
+	var childIn bytes.Buffer
+
+	base := time.Now()
+	// ExpiresAt is 60ms out relative to the wrapper's clock, so the expiry timer
+	// fires while the answer read is blocked.
+	w := &Wrapper{
+		Cmd:         []string{"x"},
+		EnvelopeOut: io.Discard,
+		AnswerIn:    answers,
+		Stdout:      io.Discard,
+		Expiry:      60 * time.Millisecond,
+		Now:         func() time.Time { return time.Now() }, // real clock consistent with ExpiresAt below
+		NewID:       func() string { return "ID" },
+	}
+	_ = base
+
+	done := make(chan error, 1)
+	go func() {
+		done <- w.Process(context.Background(), strings.NewReader("Proceed? [y/N]\n"), &childIn)
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Process: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Process did not return after envelope expiry — answer read still blocking")
+	}
+	if got := childIn.String(); got != "n\n" {
+		t.Errorf("childIn=%q want default choice n forwarded on expiry", got)
+	}
+}
+
+// TestWrapperProcess_ChildDoneUnblocksAnswerRead guards the child-exit path:
+// when the wrapped child dies mid-prompt, the wrapper must observe it and unblock
+// the answer read (forwarding the default) instead of parking on stdin.
+func TestWrapperProcess_ChildDoneUnblocksAnswerRead(t *testing.T) {
+	answers := newBlockingReader()
+	defer answers.Close()
+	var childIn bytes.Buffer
+
+	childDone := make(chan struct{})
+	w := &Wrapper{
+		Cmd:         []string{"x"},
+		EnvelopeOut: io.Discard,
+		AnswerIn:    answers,
+		Stdout:      io.Discard,
+		Now:         time.Now,
+		NewID:       func() string { return "ID" },
+		childDone:   childDone,
+	}
+
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		close(childDone) // child process exited
+	}()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- w.Process(context.Background(), strings.NewReader("Run it? [y/N]\n"), &childIn)
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Process: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Process did not return after child exit — answer read still blocking")
+	}
+	if got := childIn.String(); got != "n\n" {
+		t.Errorf("childIn=%q want default choice n forwarded on child exit", got)
+	}
+}
+
+// TestWrapperRun_ChildExitDoesNotHang is an end-to-end guard: Run wraps a real
+// child that prints a prompt and then exits without any answer being provided.
+// With the fix, Run returns promptly (child-exit cancels the answer read); the
+// pre-fix code would block forever on the answer decode.
+func TestWrapperRun_ChildExitDoesNotHang(t *testing.T) {
+	// A shell that emits a prompt line then exits 0. No answer is ever supplied.
+	answers := newBlockingReader()
+	defer answers.Close()
+	w := &Wrapper{
+		Cmd:         []string{"sh", "-c", "echo 'Allow? [y/N]'; exit 0"},
+		EnvelopeOut: io.Discard,
+		AnswerIn:    answers,
+		Stdout:      io.Discard,
+		Stderr:      io.Discard,
+	}
+	done := make(chan error, 1)
+	go func() { done <- w.Run(context.Background()) }()
+	select {
+	case <-done:
+		// Returned — the child-exit signal unblocked the wrapper.
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run hung after child exit — answer read never cancelled")
+	}
+}
+
 func TestWrapperProcess_ContextBounded(t *testing.T) {
 	var lines []string
 	for i := 0; i < 50; i++ {

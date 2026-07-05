@@ -6,8 +6,62 @@ project loosely follows [SemVer](https://semver.org).
 
 ## [Unreleased]
 
-- Windows support (m1 wrapper currently relies on Unix pty)
-- `agentq wrap --daemon` first-class integration with the serve daemon
+## [0.4.0] - 2026-07-05
+
+Platform + integration release: `agentq` now runs on Windows and `agentq wrap`
+can bootstrap the daemon itself, plus four correctness fixes so stale cards leave
+the queue and every phone stays in sync. The `ApprovalEnvelope` wire format is
+unchanged.
+
+### Added
+
+- **Windows support** (`internal/wrapper/spawn.go`, `spawn_unix.go`,
+  `spawn_windows.go`) — the child-agent launch is now behind a build-tagged
+  `childProcess` abstraction: the macOS + Linux path keeps the original
+  `os/exec`-pipe behavior, and Windows (which has no Unix pty) gets a pipe-based
+  stdio fallback selected via `//go:build windows`. `agentq wrap -- <agent>` now
+  compiles and runs on Windows, forwarding the same `ApprovalEnvelope`s with no
+  daemon/UI changes. Removes the "macOS + Linux only" limitation.
+- **`agentq wrap --daemon`** (`internal/cli/wrap.go`,
+  `internal/cli/daemon_bootstrap.go`, `internal/cli/daemon_forward.go`) — a
+  first-class integration that starts (or reuses) the local `serve` daemon and
+  forwards this agent's prompts to it, so the operator no longer has to launch
+  `agentq serve` by hand first. If a daemon already answers on the port it is
+  reused; otherwise one is started in-process. New `--daemon-listen` and
+  `--daemon-token` flags tune the target. Wire format unchanged — this is only a
+  transport bootstrap.
+
+### Fixed
+
+- **Answered cards now disappear from every connected phone**
+  (`internal/daemon/server.go`, `internal/daemon/queue.go`) — `EventAnswered` was
+  broadcast only on `Queue.Answer`'s success branch, which needs a live in-flight
+  waiter. The 202 "persisted for audit" path and the 409 already-answered path
+  emitted no event, so every phone but the one that tapped kept a dead card. Both
+  paths now broadcast an answered/removed event via `Queue.BroadcastAnswered`, so
+  all connected UIs drop the card.
+- **The stdio wrapper's answer read is now cancellable**
+  (`internal/wrapper/stdio.go`) — after emitting an envelope the wrapper called a
+  blocking `answerDec.Decode`, ignoring `ctx`, the envelope's `ExpiresAt`, and
+  child exit, so Ctrl-C/SIGTERM left it parked on stdin (needing `kill -9`), the
+  expiry "give up and abort" contract was never enforced, and a mid-prompt child
+  crash was never observed. The answer read now runs in a goroutine and selects
+  over `{answer, ctx.Done(), expiry-timer, child-exit}`, forwarding the default
+  choice (or aborting) on any of the latter three; `Run` watches `cmd.Wait` and
+  cancels the context on child exit.
+- **Expired / timed-out envelopes leave the live queue**
+  (`internal/daemon/store.go`, `internal/daemon/server.go`) — `ListEnvelopes`
+  filtered only on a stored answer, so an aborted envelope kept appearing in
+  `GET /api/queue` and the WebSocket bootstrap snapshot forever, crowding the
+  50-item cap. It now also skips envelopes past their `ExpiresAt`, and the
+  `POST /api/envelopes` timeout path broadcasts a removal so UIs drop the card
+  immediately.
+- **No more notification storm on backlog (re)load** (`web/app.js`) —
+  `renderEnvelope` called `notify()` for every card, including the entire initial
+  backlog, so reopening a tab with N pending cards fired N browser notifications
+  at once. Backlog cards (the REST snapshot and the WebSocket bootstrap burst)
+  now render silently; only genuinely-live envelopes that arrive after the
+  snapshot settles trigger a notification.
 
 ## [0.3.0] - 2026-07-02
 
@@ -116,6 +170,8 @@ First public preview. Covers the three milestones from the original MVP plan.
 - `agentq wrap` integrates with `agentq serve` via the documented stdout/stdin
   contract for now. A first-class `wrap --daemon` mode lands in v0.1.1.
 
-[Unreleased]: https://github.com/SuperMarioYL/agentq/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/SuperMarioYL/agentq/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/SuperMarioYL/agentq/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/SuperMarioYL/agentq/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/SuperMarioYL/agentq/releases/tag/v0.2.0
 [0.1.0]: https://github.com/SuperMarioYL/agentq/releases/tag/v0.1.0

@@ -16,20 +16,29 @@ import (
 
 func newTestServer(t *testing.T, token string) (*httptest.Server, *Store) {
 	t.Helper()
+	ts, store, _ := newTestServerWithQueue(t, token)
+	return ts, store
+}
+
+// newTestServerWithQueue is like newTestServer but also returns the Queue so a
+// test can Subscribe and assert the broadcasts the answer/expiry paths emit.
+func newTestServerWithQueue(t *testing.T, token string) (*httptest.Server, *Store, *Queue) {
+	t.Helper()
 	store, err := OpenStore(filepath.Join(t.TempDir(), "queue.db"))
 	if err != nil {
 		t.Fatalf("OpenStore: %v", err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
+	q := NewQueue()
 	srv := NewServer(Config{
 		Token:       token,
 		Store:       store,
-		Queue:       NewQueue(),
+		Queue:       q,
 		EnvelopeTTL: 2 * time.Second,
 	})
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
-	return ts, store
+	return ts, store, q
 }
 
 func TestServer_QueueRequiresToken(t *testing.T) {
@@ -305,6 +314,143 @@ func TestServer_SecondAnswerDoesNotOverwriteAudit(t *testing.T) {
 	}
 	if stored.ChoiceKey != "y" {
 		t.Errorf("audit record overwritten: ChoiceKey=%q want y", stored.ChoiceKey)
+	}
+}
+
+// waitForAnsweredEvent drains the subscriber channel until it sees an
+// EventAnswered for id, or fails after a short timeout.
+func waitForAnsweredEvent(t *testing.T, ch <-chan Event, id string) {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case ev := <-ch:
+			if ev.Kind == EventAnswered && ev.Answer != nil && ev.Answer.EnvelopeID == id {
+				return
+			}
+		case <-deadline:
+			t.Fatalf("no EventAnswered broadcast for %q", id)
+		}
+	}
+}
+
+// TestServer_AnswerBroadcastsOn202Path guards fix-answered-card-not-broadcast-to-other-tabs:
+// answering a card whose wrapper already timed out (no live waiter → 202) must
+// still broadcast an answered event so OTHER connected phones drop the stale
+// card. Before the fix the 202 path emitted no event.
+func TestServer_AnswerBroadcastsOn202Path(t *testing.T) {
+	ts, store, q := newTestServerWithQueue(t, "")
+	ch, cancel := q.Subscribe()
+	defer cancel()
+
+	_ = store.PutEnvelope(&protocol.ApprovalEnvelope{
+		ID: "b202", AgentID: "a", Prompt: "p",
+		Choices: []protocol.Choice{{Key: "y"}, {Key: "n"}},
+	})
+
+	res, err := http.Post(ts.URL+"/api/queue/b202/answer",
+		"application/json", strings.NewReader(`{"choice_key":"y"}`))
+	if err != nil {
+		t.Fatalf("answer: %v", err)
+	}
+	res.Body.Close()
+	if res.StatusCode != http.StatusAccepted {
+		t.Fatalf("status=%d want 202", res.StatusCode)
+	}
+	waitForAnsweredEvent(t, ch, "b202")
+}
+
+// TestServer_AnswerBroadcastsOn409Path guards the 409 already-answered path: a
+// second answer to an already-answered card must broadcast a removal so the
+// other phones (whose card is still on screen) drop it. Before the fix the 409
+// path emitted no event.
+func TestServer_AnswerBroadcastsOn409Path(t *testing.T) {
+	ts, store, q := newTestServerWithQueue(t, "")
+
+	_ = store.PutEnvelope(&protocol.ApprovalEnvelope{
+		ID: "b409", AgentID: "a", Prompt: "p",
+		Choices: []protocol.Choice{{Key: "y"}, {Key: "n"}},
+	})
+
+	// First answer (202, persisted for audit).
+	res1, err := http.Post(ts.URL+"/api/queue/b409/answer",
+		"application/json", strings.NewReader(`{"choice_key":"y"}`))
+	if err != nil {
+		t.Fatalf("first answer: %v", err)
+	}
+	res1.Body.Close()
+
+	// Now subscribe, THEN send the second answer so we only observe the 409 path.
+	ch, cancel := q.Subscribe()
+	defer cancel()
+	res2, err := http.Post(ts.URL+"/api/queue/b409/answer",
+		"application/json", strings.NewReader(`{"choice_key":"n"}`))
+	if err != nil {
+		t.Fatalf("second answer: %v", err)
+	}
+	res2.Body.Close()
+	if res2.StatusCode != http.StatusConflict {
+		t.Fatalf("second answer status=%d want 409", res2.StatusCode)
+	}
+	waitForAnsweredEvent(t, ch, "b409")
+}
+
+// TestServer_PostEnvelopeTimeoutBroadcastsRemoval guards the expiry-removal
+// broadcast: when a wrapper's POST /api/envelopes times out (504), the daemon
+// must broadcast a removal so connected UIs drop the now-dead card immediately.
+func TestServer_PostEnvelopeTimeoutBroadcastsRemoval(t *testing.T) {
+	ts, _, q := newTestServerWithQueue(t, "")
+	ch, cancel := q.Subscribe()
+	defer cancel()
+
+	env := protocol.ApprovalEnvelope{
+		ID: "toremove", AgentID: "a", Prompt: "p",
+		Choices:   []protocol.Choice{{Key: "y"}},
+		ExpiresAt: time.Now().Add(120 * time.Millisecond),
+	}
+	body, _ := json.Marshal(env)
+	res, err := http.Post(ts.URL+"/api/envelopes", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	res.Body.Close()
+	if res.StatusCode != http.StatusGatewayTimeout {
+		t.Fatalf("status=%d want 504", res.StatusCode)
+	}
+	// The first event is the EventNewEnvelope from Register; drain until removal.
+	waitForAnsweredEvent(t, ch, "toremove")
+}
+
+// TestServer_ExpiredEnvelopeNotListed guards fix-expired-envelopes-linger-in-queue:
+// an envelope whose ExpiresAt has passed must not appear in GET /api/queue even
+// though no answer was ever recorded. Before the fix ListEnvelopes filtered only
+// on a stored answer, so aborted envelopes lingered forever.
+func TestServer_ExpiredEnvelopeNotListed(t *testing.T) {
+	ts, store, _ := newTestServerWithQueue(t, "")
+
+	// One live envelope, one already expired.
+	_ = store.PutEnvelope(&protocol.ApprovalEnvelope{
+		ID: "live-1", AgentID: "a", Prompt: "p",
+		Choices:   []protocol.Choice{{Key: "y"}},
+		ExpiresAt: time.Now().Add(time.Hour),
+	})
+	_ = store.PutEnvelope(&protocol.ApprovalEnvelope{
+		ID: "expired-1", AgentID: "a", Prompt: "p",
+		Choices:   []protocol.Choice{{Key: "y"}},
+		ExpiresAt: time.Now().Add(-time.Minute),
+	})
+
+	res, err := http.Get(ts.URL + "/api/queue")
+	if err != nil {
+		t.Fatalf("queue list: %v", err)
+	}
+	defer res.Body.Close()
+	var list []protocol.ApprovalEnvelope
+	if err := json.NewDecoder(res.Body).Decode(&list); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(list) != 1 || list[0].ID != "live-1" {
+		t.Fatalf("queue=%+v want only live-1 (expired dropped)", list)
 	}
 }
 

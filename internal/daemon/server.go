@@ -204,6 +204,10 @@ func (s *Server) postEnvelope(c echo.Context) error {
 	ans, err := s.cfg.Queue.Wait(ctx, env.ID)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			// The wrapper gave up (envelope expired / TTL elapsed). Tell every
+			// connected phone to drop the now-dead card so it does not linger in
+			// the live queue; ListEnvelopes also filters it out on the next poll.
+			s.cfg.Queue.BroadcastRemoved(env.ID)
 			return echo.NewHTTPError(http.StatusGatewayTimeout, "no answer within ttl")
 		}
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
@@ -244,7 +248,11 @@ func (s *Server) answerEnvelope(c echo.Context) error {
 	stored, err := s.cfg.Store.PutAnswerIfAbsent(&ans)
 	if err != nil {
 		if errors.Is(err, ErrAnswerExists) {
-			// Already answered earlier; surface the recorded answer verbatim.
+			// Already answered earlier by another phone/tab. Broadcast the
+			// removal so EVERY connected phone (not just this one) drops the
+			// stale card — Queue.Answer only emits an event when it delivers to
+			// a live waiter, which no longer exists on this path.
+			s.cfg.Queue.BroadcastAnswered(*stored)
 			return c.JSON(http.StatusConflict, stored)
 		}
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
@@ -252,6 +260,9 @@ func (s *Server) answerEnvelope(c echo.Context) error {
 	if err := s.cfg.Queue.Answer(ans); err != nil {
 		if errors.Is(err, ErrNotFound) {
 			// Wrapper already gave up; the answer is still persisted for audit.
+			// Broadcast so all connected phones drop the dead card — the success
+			// branch of Queue.Answer never ran because there was no live waiter.
+			s.cfg.Queue.BroadcastAnswered(ans)
 			return c.JSON(http.StatusAccepted, ans)
 		}
 		return echo.NewHTTPError(http.StatusConflict, err.Error())

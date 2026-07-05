@@ -9,7 +9,7 @@
 <p align="center">
   <a href="./LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-6ea8ff?style=flat-square"></a>
   <a href="https://go.dev/"><img alt="Go 1.24" src="https://img.shields.io/badge/go-1.24-00ADD8?style=flat-square&logo=go&logoColor=white"></a>
-  <a href="https://github.com/SuperMarioYL/agentq/releases"><img alt="status" src="https://img.shields.io/badge/release-v0.3.0-51d1a3?style=flat-square"></a>
+  <a href="https://github.com/SuperMarioYL/agentq/releases"><img alt="status" src="https://img.shields.io/badge/release-v0.4.0-51d1a3?style=flat-square"></a>
   <a href="#"><img alt="Claude Code" src="https://img.shields.io/badge/Claude%20Code-ready-7c5cff?style=flat-square"></a>
   <a href="#"><img alt="Coding Agent" src="https://img.shields.io/badge/Coding%20Agent-N%3A1-51d1a3?style=flat-square"></a>
 </p>
@@ -106,7 +106,7 @@ Everything under `/api` and `/ws` requires `?t=<token>` or `Authorization: Beare
 | `--token` | string | auto-generated | Bearer token clients must present |
 | `--token-out` | path | unset | Optional file to write the active token to (consumed by `attach --token-file`) |
 
-`agentq wrap` keeps the m1 stdout/stdin contract from m1 — a tiny bridge script can `POST` each envelope line to the daemon. First-class `wrap --daemon` integration ships in v0.1.1.
+`agentq wrap` keeps the m1 stdout/stdin contract from m1 — a tiny bridge script can `POST` each envelope line to the daemon. As of v0.4 you can also run `agentq wrap --daemon -- <agent>`, which starts (or reuses) the local `serve` daemon and forwards prompts to it in a single command.
 
 ## vs ChromeDevTools/chrome-devtools-mcp
 
@@ -129,7 +129,8 @@ Different ends of the same plumbing — both worth running.
 - [x] m3: phone-first responsive SPA + terminal QR
 - [x] v0.2: Cursor / Aider adapter (`agentq wrap --agent cursor`); fixes for the lost-approval race, non-monotonic ULID ordering, and attach picking an unreachable LAN IP
 - [x] v0.3: publish the `ApprovalEnvelope` JSON Schema (`GET /schema/approval-envelope.json`); fixes for a second/racing answer overwriting the audit record and for CursorMatcher minting duplicate choice keys on same-first-letter options
-- [ ] v0.4: Windows support; `Team` mode — shared queue across an eng squad + audit log (paid tier candidate)
+- [x] v0.4: Windows support (build-tagged pty/pipe child-process split); first-class `agentq wrap --daemon`; fixes for answered cards not broadcasting, the wrap answer read not being cancellable, expired envelopes lingering in the queue, and the notification storm on backlog reload
+- [ ] v0.5: `Team` mode — shared queue across an eng squad + audit log (paid tier candidate)
 
 ## License & contributing
 

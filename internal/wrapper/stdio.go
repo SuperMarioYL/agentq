@@ -16,7 +16,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os/exec"
 	"regexp"
 	"strings"
 	"sync"
@@ -72,6 +71,12 @@ type Wrapper struct {
 	Now   func() time.Time
 	NewID func() string
 
+	// childDone, when non-nil, is closed by Run once the child process has
+	// exited. Process selects on it so a mid-prompt child crash unblocks the
+	// answer read instead of parking forever on stdin. Left nil by direct
+	// Process callers (tests) that drive childOut/childIn themselves.
+	childDone <-chan struct{}
+
 	sessionStarted time.Time
 	contextBuf     []string
 	mu             sync.Mutex
@@ -120,30 +125,35 @@ func (w *Wrapper) applyDefaults() {
 	}
 }
 
-// Run starts Cmd, mirrors its stderr, and drives Process against its
-// stdout/stdin until either the child exits or ctx is cancelled.
+// Run starts Cmd via the platform-appropriate child-process launcher
+// (build-tagged spawn_{unix,windows}.go), mirrors its stderr, and drives
+// Process against its stdout/stdin until either the child exits or ctx is
+// cancelled.
+//
+// The child's exit is turned into a first-class signal: cmd.Wait runs in a
+// goroutine, closes a childDone channel Process selects on, and cancels the
+// Process context. That way a mid-prompt child crash unblocks the answer read
+// (which would otherwise park on stdin forever) instead of needing kill -9.
 func (w *Wrapper) Run(ctx context.Context) error {
 	w.applyDefaults()
 	if len(w.Cmd) == 0 {
 		return errors.New("wrapper: no command to run")
 	}
+	if spawnChild == nil {
+		return errors.New("wrapper: no child-process launcher registered for this platform")
+	}
 	w.sessionStarted = w.Now()
 
-	cmd := exec.CommandContext(ctx, w.Cmd[0], w.Cmd[1:]...)
-	childIn, err := cmd.StdinPipe()
-	if err != nil {
-		return fmt.Errorf("wrapper: stdin pipe: %w", err)
-	}
-	childOut, err := cmd.StdoutPipe()
-	if err != nil {
-		return fmt.Errorf("wrapper: stdout pipe: %w", err)
-	}
-	childErr, err := cmd.StderrPipe()
-	if err != nil {
-		return fmt.Errorf("wrapper: stderr pipe: %w", err)
-	}
+	// Derive a cancellable context so the child-exit watcher can unblock the
+	// IO loop even when the parent ctx is still live.
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
-	if err := cmd.Start(); err != nil {
+	child, err := spawnChild(runCtx, w.Cmd[0], w.Cmd[1:]...)
+	if err != nil {
+		return err
+	}
+	if err := child.Start(); err != nil {
 		return fmt.Errorf("wrapper: start %q: %w", w.Cmd[0], err)
 	}
 
@@ -151,15 +161,33 @@ func (w *Wrapper) Run(ctx context.Context) error {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		_, _ = io.Copy(w.Stderr, childErr)
+		_, _ = io.Copy(w.Stderr, child.Stderr())
 	}()
 
-	procErr := w.Process(ctx, childOut, childIn)
-	_ = childIn.Close()
+	// Watch for child exit: close childDone + cancel runCtx so a blocked
+	// answer read (or the scanner loop) wakes up on child death.
+	childDone := make(chan struct{})
+	var (
+		waitErr  error
+		waitOnce sync.Once
+	)
+	waitDone := make(chan struct{})
+	go func() {
+		waitErr = child.Wait()
+		waitOnce.Do(func() { close(childDone) })
+		cancel()
+		close(waitDone)
+	}()
+
+	w.childDone = childDone
+	procErr := w.Process(runCtx, child.Stdout(), child.Stdin())
+	_ = child.CloseStdin()
+
+	// Ensure the watcher goroutine has recorded waitErr before we read it.
+	<-waitDone
 	wg.Wait()
 
-	waitErr := cmd.Wait()
-	if procErr != nil {
+	if procErr != nil && !errors.Is(procErr, context.Canceled) {
 		return procErr
 	}
 	return waitErr
@@ -207,21 +235,93 @@ func (w *Wrapper) Process(ctx context.Context, childOut io.Reader, childIn io.Wr
 			return ErrNoAnswerSource
 		}
 
-		var ans protocol.Answer
-		if err := answerDec.Decode(&ans); err != nil {
-			return fmt.Errorf("wrapper: read answer for %s: %w", env.ID, err)
+		key, err := w.awaitAnswer(ctx, answerDec, env)
+		if err != nil {
+			return err
 		}
-		if ans.EnvelopeID != env.ID {
-			return fmt.Errorf("wrapper: answer envelope_id=%q does not match pending=%q", ans.EnvelopeID, env.ID)
-		}
-		if !choiceExists(env.Choices, ans.ChoiceKey) {
-			return fmt.Errorf("wrapper: choice %q not in envelope %s", ans.ChoiceKey, env.ID)
-		}
-		if _, err := io.WriteString(childIn, ans.ChoiceKey+"\n"); err != nil {
+		if _, err := io.WriteString(childIn, key+"\n"); err != nil {
 			return fmt.Errorf("wrapper: forward answer to child: %w", err)
 		}
 	}
 	return scanner.Err()
+}
+
+// decodedAnswer carries the result of one background answerDec.Decode so the
+// blocking read can participate in a select.
+type decodedAnswer struct {
+	ans protocol.Answer
+	err error
+}
+
+// awaitAnswer reads the next Answer for env, but never blocks indefinitely: the
+// decode runs in a goroutine and awaitAnswer selects over {answer, ctx.Done(),
+// envelope-expiry timer, child-exit}. On ctx cancellation (Ctrl-C/SIGTERM),
+// envelope expiry (the ExpiresAt "give up and abort" contract), or child death,
+// it forwards the IsDefault choice — the same fallback the wrapper's timeout
+// contract promises — instead of parking on stdin until kill -9.
+func (w *Wrapper) awaitAnswer(ctx context.Context, dec *json.Decoder, env *protocol.ApprovalEnvelope) (string, error) {
+	ansCh := make(chan decodedAnswer, 1)
+	go func() {
+		var a protocol.Answer
+		err := dec.Decode(&a)
+		ansCh <- decodedAnswer{ans: a, err: err}
+	}()
+
+	// Timer for the envelope's own expiry. A zero/absent ExpiresAt means "no
+	// wrapper-side deadline" — leave the timer channel nil so the select ignores
+	// it. The deadline is measured against the wrapper's injectable clock (w.Now)
+	// so it stays consistent with how fillEnvelope minted ExpiresAt; tests that
+	// pin Now to a fixed time therefore never see a spurious immediate expiry.
+	var expiryCh <-chan time.Time
+	if !env.ExpiresAt.IsZero() {
+		d := env.ExpiresAt.Sub(w.Now())
+		if d <= 0 {
+			// Already expired before we even read: fall back immediately.
+			return w.abortKey(env, "envelope already expired")
+		}
+		t := time.NewTimer(d)
+		defer t.Stop()
+		expiryCh = t.C
+	}
+
+	select {
+	case res := <-ansCh:
+		if res.err != nil {
+			return "", fmt.Errorf("wrapper: read answer for %s: %w", env.ID, res.err)
+		}
+		if res.ans.EnvelopeID != env.ID {
+			return "", fmt.Errorf("wrapper: answer envelope_id=%q does not match pending=%q", res.ans.EnvelopeID, env.ID)
+		}
+		if !choiceExists(env.Choices, res.ans.ChoiceKey) {
+			return "", fmt.Errorf("wrapper: choice %q not in envelope %s", res.ans.ChoiceKey, env.ID)
+		}
+		return res.ans.ChoiceKey, nil
+	case <-ctx.Done():
+		return w.abortKey(env, "context cancelled")
+	case <-expiryCh:
+		return w.abortKey(env, "envelope expired")
+	case <-w.childDoneCh():
+		return w.abortKey(env, "child process exited")
+	}
+}
+
+// childDoneCh returns the child-exit channel, or a nil channel (which blocks
+// forever in a select) when Run did not wire one — e.g. direct Process callers.
+func (w *Wrapper) childDoneCh() <-chan struct{} {
+	return w.childDone
+}
+
+// abortKey resolves an unanswered prompt to the envelope's default choice so the
+// wrapped agent is unblocked with the agent's own safe fallback rather than left
+// hanging. If the envelope has no default choice, the prompt is aborted with an
+// error naming the reason.
+func (w *Wrapper) abortKey(env *protocol.ApprovalEnvelope, reason string) (string, error) {
+	for _, c := range env.Choices {
+		if c.IsDefault {
+			return c.Key, nil
+		}
+	}
+	return "", fmt.Errorf("wrapper: %s and envelope %s has no default choice to fall back on", reason, env.ID)
 }
 
 func (w *Wrapper) matchAny(line, snapshot string) *protocol.ApprovalEnvelope {

@@ -128,6 +128,29 @@ func (q *Queue) Answer(ans protocol.Answer) error {
 	}
 }
 
+// BroadcastAnswered fans an EventAnswered out to every subscriber for the given
+// envelope ID without needing a live in-flight waiter. Queue.Answer only emits
+// EventAnswered when it successfully delivers to a waiter, so the answer paths
+// that resolve a card WITHOUT a waiter — the 202 "persisted for audit" path
+// (the producing wrapper already timed out) and the 409 already-answered path (a
+// second phone/stale tab) — must call this so every OTHER connected phone drops
+// the now-dead card. Idempotent and safe to call with no subscribers.
+//
+// The broadcast Event carries only the Answer (matching Queue.Answer's shape) so
+// the web UI removes the card on ev.answer.envelope_id exactly as it does for a
+// live answer, keeping the WebSocket contract unchanged.
+func (q *Queue) BroadcastAnswered(ans protocol.Answer) {
+	q.broadcast(Event{Kind: EventAnswered, Answer: &ans})
+}
+
+// BroadcastRemoved fans an EventAnswered (removal) out for an envelope that left
+// the queue without a human answer — e.g. the producing wrapper's POST timed out
+// and the envelope expired. Reusing EventAnswered means the web UI drops the card
+// through its existing answer branch, so no new WebSocket event kind is needed.
+func (q *Queue) BroadcastRemoved(envelopeID string) {
+	q.broadcast(Event{Kind: EventAnswered, Answer: &protocol.Answer{EnvelopeID: envelopeID}})
+}
+
 // Pending reports whether a waiter is still registered for id. Used by
 // tests and the /api/queue endpoint to distinguish "still waiting" from
 // "wrapper gave up".

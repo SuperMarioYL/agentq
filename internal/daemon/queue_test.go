@@ -211,3 +211,48 @@ func TestQueue_SubscribeCancelClosesChannel(t *testing.T) {
 		t.Fatal("expected channel closed after cancel")
 	}
 }
+
+// TestQueue_BroadcastAnsweredWithoutWaiter guards fix-answered-card-not-broadcast-to-other-tabs:
+// the 202 and 409 answer paths resolve a card that has NO live waiter, so
+// Queue.Answer's success branch never fires the EventAnswered. BroadcastAnswered
+// must still fan an answered event out to every subscriber so other phones drop
+// the dead card. Before the fix there was no such helper and those paths were
+// silent.
+func TestQueue_BroadcastAnsweredWithoutWaiter(t *testing.T) {
+	q := NewQueue()
+	ch, cancel := q.Subscribe()
+	defer cancel()
+
+	// No Register / Wait: there is deliberately no waiter, mirroring the 202/409
+	// server paths.
+	q.BroadcastAnswered(protocol.Answer{EnvelopeID: "01DEAD", ChoiceKey: "y"})
+
+	select {
+	case ev := <-ch:
+		if ev.Kind != EventAnswered || ev.Answer == nil || ev.Answer.EnvelopeID != "01DEAD" {
+			t.Errorf("unexpected event: %+v", ev)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("BroadcastAnswered did not reach subscriber")
+	}
+}
+
+// TestQueue_BroadcastRemoved guards the expiry-removal broadcast used on the
+// postEnvelope timeout path: a removal must reach subscribers as an EventAnswered
+// (removal) carrying the envelope id so the UI drops the card.
+func TestQueue_BroadcastRemoved(t *testing.T) {
+	q := NewQueue()
+	ch, cancel := q.Subscribe()
+	defer cancel()
+
+	q.BroadcastRemoved("01GONE")
+
+	select {
+	case ev := <-ch:
+		if ev.Kind != EventAnswered || ev.Answer == nil || ev.Answer.EnvelopeID != "01GONE" {
+			t.Errorf("unexpected event: %+v", ev)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("BroadcastRemoved did not reach subscriber")
+	}
+}

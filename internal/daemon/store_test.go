@@ -91,6 +91,36 @@ func TestStore_ListSkipsAnswered(t *testing.T) {
 	}
 }
 
+// TestStore_ListSkipsExpired guards fix-expired-envelopes-linger-in-queue: an
+// envelope whose ExpiresAt is in the past must be excluded from ListEnvelopes
+// even with no stored answer, while a future-dated and a zero-ExpiresAt envelope
+// are kept. Before the fix ListEnvelopes filtered only on a stored answer.
+func TestStore_ListSkipsExpired(t *testing.T) {
+	s := newTestStore(t)
+	now := time.Now()
+	_ = s.PutEnvelope(&protocol.ApprovalEnvelope{
+		ID: "01future", AgentID: "a", Prompt: "p", ExpiresAt: now.Add(time.Hour),
+	})
+	_ = s.PutEnvelope(&protocol.ApprovalEnvelope{
+		ID: "02expired", AgentID: "a", Prompt: "p", ExpiresAt: now.Add(-time.Hour),
+	})
+	_ = s.PutEnvelope(&protocol.ApprovalEnvelope{
+		ID: "03noexpiry", AgentID: "a", Prompt: "p", // zero ExpiresAt = never expires
+	})
+	list, err := s.ListEnvelopes(10)
+	if err != nil {
+		t.Fatalf("ListEnvelopes: %v", err)
+	}
+	if len(list) != 2 {
+		t.Fatalf("len=%d want 2 (expired dropped): %+v", len(list), list)
+	}
+	for _, e := range list {
+		if e.ID == "02expired" {
+			t.Errorf("expired envelope still listed: %+v", e)
+		}
+	}
+}
+
 func TestStore_ListRespectsLimit(t *testing.T) {
 	s := newTestStore(t)
 	for _, id := range []string{"01", "02", "03"} {

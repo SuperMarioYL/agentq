@@ -29,6 +29,16 @@ type WrapOptions struct {
 	// bracketed "[y/n]" form), "cursor"/"aider" (parenthesized "(Y)es/(N)o"
 	// form), or "auto" (try both). All emit the same ApprovalEnvelope.
 	Agent string
+
+	// Daemon, when true, starts (or reuses) the local serve daemon and forwards
+	// this agent's envelopes to it — one command instead of `serve` + `wrap`.
+	Daemon bool
+	// DaemonListen is the daemon host:port used in --daemon mode. Empty defaults
+	// to 127.0.0.1:7777 (the serve default).
+	DaemonListen string
+	// DaemonToken is an explicit bearer token for --daemon mode. Empty means a
+	// reused daemon needs no token from us, or a freshly-started one mints its own.
+	DaemonToken string
 }
 
 // matchersForAgent maps the --agent value to the PromptMatcher set the
@@ -78,6 +88,12 @@ m2 daemon will speak the same wire format over HTTP+WebSocket.`,
 		"How long each envelope is valid without a reply.")
 	cmd.Flags().StringVar(&opts.Agent, "agent", "auto",
 		"Prompt dialect to recognize: claude (bracketed [y/n]), cursor/aider (parenthesized (Y)es/(N)o), or auto (both).")
+	cmd.Flags().BoolVar(&opts.Daemon, "daemon", false,
+		"Start (or reuse) the local serve daemon and forward this agent's prompts to it, so no separate `agentq serve` is needed.")
+	cmd.Flags().StringVar(&opts.DaemonListen, "daemon-listen", "127.0.0.1:7777",
+		"host:port of the serve daemon to reuse or start in --daemon mode.")
+	cmd.Flags().StringVar(&opts.DaemonToken, "daemon-token", "",
+		"bearer token for --daemon mode (default: reuse needs none / a started daemon mints one).")
 	return cmd
 }
 
@@ -91,17 +107,36 @@ func RunWrap(parent context.Context, opts WrapOptions, args []string, stdout, st
 	ctx, cancel := signal.NotifyContext(parent, os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	envOut, closeEnv, err := openEnvelopeOut(opts.EnvelopeOut, stdout)
-	if err != nil {
-		return fmt.Errorf("wrap: --envelope-out %q: %w", opts.EnvelopeOut, err)
-	}
-	defer closeEnv()
+	var (
+		envOut io.Writer
+		ansIn  io.Reader
+	)
 
-	ansIn, closeAns, err := openAnswerIn(opts.AnswerIn, stdin)
-	if err != nil {
-		return fmt.Errorf("wrap: --answer-in %q: %w", opts.AnswerIn, err)
+	if opts.Daemon {
+		// --daemon: bootstrap (reuse-or-start) the local serve daemon, then route
+		// this agent's envelopes to it over HTTP instead of files/stdio.
+		fwd, closeFwd, derr := setupDaemonForward(ctx, opts, stdout)
+		if derr != nil {
+			return derr
+		}
+		defer closeFwd()
+		envOut = fwd
+		ansIn = fwd
+	} else {
+		eo, closeEnv, err := openEnvelopeOut(opts.EnvelopeOut, stdout)
+		if err != nil {
+			return fmt.Errorf("wrap: --envelope-out %q: %w", opts.EnvelopeOut, err)
+		}
+		defer closeEnv()
+
+		ai, closeAns, err := openAnswerIn(opts.AnswerIn, stdin)
+		if err != nil {
+			return fmt.Errorf("wrap: --answer-in %q: %w", opts.AnswerIn, err)
+		}
+		defer closeAns()
+		envOut = eo
+		ansIn = ai
 	}
-	defer closeAns()
 
 	w := &wrapper.Wrapper{
 		Cmd:         args,
@@ -113,12 +148,77 @@ func RunWrap(parent context.Context, opts WrapOptions, args []string, stdout, st
 		Stderr:      stderr,
 		Expiry:      opts.Expiry,
 	}
-	err = w.Run(ctx)
+	err := w.Run(ctx)
 	if err != nil && ctx.Err() != nil {
 		// Treat interrupt-driven shutdown as success — the operator asked for it.
 		return nil
 	}
 	return err
+}
+
+// setupDaemonForward implements `wrap --daemon`: ensure a serve daemon is up
+// (reuse the one already on the port, else start one in-process), then return a
+// daemonForwarder wired to it as both the wrapper's envelope sink and answer
+// source. The returned close func flushes the forwarder and stops any daemon
+// this wrap started (reused daemons are left running).
+func setupDaemonForward(ctx context.Context, opts WrapOptions, stdout io.Writer) (*daemonForwarder, func(), error) {
+	listen := opts.DaemonListen
+	if listen == "" {
+		listen = "127.0.0.1:7777"
+	}
+	boot := daemonBootstrap{
+		Listen: listen,
+		Token:  opts.DaemonToken,
+		probe:  probeDaemon,
+		start:  startInProcessDaemon(stdout),
+	}
+	handle, err := boot.ensureDaemon(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	if handle.Reused {
+		fmt.Fprintf(stdout, "wrap --daemon: reusing daemon at %s\n", handle.BaseURL)
+	} else {
+		fmt.Fprintf(stdout, "wrap --daemon: started daemon at %s\n", handle.BaseURL)
+	}
+
+	fwd := newDaemonForwarder(handle.BaseURL, handle.Token)
+	closeFn := func() {
+		_ = fwd.Close()
+		handle.Close()
+	}
+	return fwd, closeFn, nil
+}
+
+// startInProcessDaemon returns a daemonBootstrap.start that launches the serve
+// daemon inside this process (a goroutine running RunServe) and blocks until it
+// is accepting connections. The returned stop func cancels it and waits briefly
+// for a clean shutdown.
+func startInProcessDaemon(stdout io.Writer) func(ctx context.Context, listen, token string) (func(), error) {
+	return func(ctx context.Context, listen, token string) (func(), error) {
+		serveCtx, cancel := context.WithCancel(ctx)
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			_ = RunServe(serveCtx, ServeOptions{
+				Listen: listen,
+				Token:  token,
+			}, io.Discard, io.Discard)
+		}()
+		if err := waitForDaemon(listen, 5*time.Second); err != nil {
+			cancel()
+			<-done
+			return nil, err
+		}
+		stop := func() {
+			cancel()
+			select {
+			case <-done:
+			case <-time.After(6 * time.Second):
+			}
+		}
+		return stop, nil
+	}
 }
 
 func openEnvelopeOut(path string, fallback io.Writer) (io.Writer, func() error, error) {

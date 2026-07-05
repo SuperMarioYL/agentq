@@ -95,11 +95,17 @@ func (s *Store) GetEnvelope(id string) (*protocol.ApprovalEnvelope, error) {
 
 // ListEnvelopes returns up to limit envelopes in ascending ID order
 // (ULID is monotonic, so this is also chronological). The returned
-// slice excludes envelopes that already have a stored answer.
+// slice excludes envelopes that already have a stored answer AND
+// envelopes whose ExpiresAt has passed: an expired envelope was aborted
+// by its wrapper (see protocol.ApprovalEnvelope.ExpiresAt), so it is a
+// dead card that must not keep appearing in GET /api/queue or the
+// WebSocket bootstrap snapshot, crowding the 50-item cap and pushing
+// live prompts out. An ExpiresAt of zero means "no expiry" and is kept.
 func (s *Store) ListEnvelopes(limit int) ([]*protocol.ApprovalEnvelope, error) {
 	if limit <= 0 {
 		limit = 50
 	}
+	now := time.Now()
 	var out []*protocol.ApprovalEnvelope
 	err := s.db.View(func(tx *bolt.Tx) error {
 		answers := tx.Bucket(answersBucket)
@@ -111,6 +117,9 @@ func (s *Store) ListEnvelopes(limit int) ([]*protocol.ApprovalEnvelope, error) {
 			var e protocol.ApprovalEnvelope
 			if err := json.Unmarshal(v, &e); err != nil {
 				return err
+			}
+			if !e.ExpiresAt.IsZero() && now.After(e.ExpiresAt) {
+				continue
 			}
 			out = append(out, &e)
 		}
