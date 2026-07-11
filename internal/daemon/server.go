@@ -187,6 +187,16 @@ func (s *Server) postEnvelope(c echo.Context) error {
 	if env.ID == "" || env.AgentID == "" || env.Prompt == "" || len(env.Choices) == 0 {
 		return echo.NewHTTPError(http.StatusBadRequest, "envelope missing required fields (id, agent_id, prompt, choices)")
 	}
+	// The envelope arrived already past its own ExpiresAt (a tight expiry that
+	// elapsed in transit, or clock skew). It is a dead card everywhere else —
+	// ListEnvelopes filters it and answerEnvelope rejects it — so registering it
+	// as a live prompt and blocking the wrapper for the FULL server TTL (the
+	// `d > 0` guard below otherwise leaves ttl at EnvelopeTTL for a non-positive
+	// remaining time) is wrong. Report the timeout immediately so the wrapper
+	// falls back to its default without a dead card ever entering the queue.
+	if !env.ExpiresAt.IsZero() && !time.Now().Before(env.ExpiresAt) {
+		return echo.NewHTTPError(http.StatusGatewayTimeout, "envelope already expired on arrival")
+	}
 	if err := s.cfg.Store.PutEnvelope(&env); err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
@@ -232,6 +242,16 @@ func (s *Server) answerEnvelope(c echo.Context) error {
 	env, err := s.cfg.Store.GetEnvelope(id)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusNotFound, "no such envelope")
+	}
+	// Reject answers past the envelope's ExpiresAt. Per
+	// protocol.ApprovalEnvelope.ExpiresAt the wrapper has already given up at that
+	// point and acted on its default choice, so persisting a human choice now
+	// would write a misleading audit record for a decision that never took effect
+	// — and ListEnvelopes already treats an expired card as dead. Reject WITHOUT
+	// persisting, and broadcast the removal so any stale phone/tab drops the card.
+	if !env.ExpiresAt.IsZero() && time.Now().After(env.ExpiresAt) {
+		s.cfg.Queue.BroadcastRemoved(id)
+		return echo.NewHTTPError(http.StatusGone, "envelope expired; the wrapper already acted on its default")
 	}
 	if !choiceKnown(env.Choices, body.ChoiceKey) {
 		return echo.NewHTTPError(http.StatusBadRequest, "choice_key not in envelope.choices")

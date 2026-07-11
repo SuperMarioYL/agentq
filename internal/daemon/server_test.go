@@ -477,3 +477,72 @@ func TestServer_SchemaEndpoint(t *testing.T) {
 		t.Errorf("schema title=%v want ApprovalEnvelope", doc["title"])
 	}
 }
+
+// TestServer_AnswerRejectsExpiredEnvelope guards fix-answer-accepts-expired-envelope:
+// per protocol.ApprovalEnvelope.ExpiresAt the daemon must NOT accept an answer past
+// that time (the wrapper already acted on its default), so a late tap returns 410 and
+// no answer is persisted as a misleading audit record.
+func TestServer_AnswerRejectsExpiredEnvelope(t *testing.T) {
+	ts, store, q := newTestServerWithQueue(t, "")
+	_ = store.PutEnvelope(&protocol.ApprovalEnvelope{
+		ID: "exp-1", AgentID: "a", Prompt: "p",
+		Choices:   []protocol.Choice{{Key: "y"}},
+		ExpiresAt: time.Now().Add(-time.Hour), // already expired
+	})
+	sub, cancel := q.Subscribe()
+	defer cancel()
+
+	res, err := http.Post(
+		ts.URL+"/api/queue/exp-1/answer",
+		"application/json",
+		strings.NewReader(`{"choice_key":"y"}`),
+	)
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusGone {
+		t.Errorf("status=%d want 410 (expired envelope must not accept an answer)", res.StatusCode)
+	}
+	// The answer must NOT have been persisted — no bogus audit record for a
+	// decision the wrapper never acted on.
+	if _, gerr := store.GetAnswer("exp-1"); gerr == nil {
+		t.Error("an answer was persisted for an expired envelope; expected none")
+	}
+	// A removal must be broadcast so stale tabs drop the dead card.
+	select {
+	case ev := <-sub:
+		if ev.Kind != EventAnswered || ev.Answer == nil || ev.Answer.EnvelopeID != "exp-1" {
+			t.Errorf("unexpected broadcast on expiry: %+v", ev)
+		}
+	case <-time.After(time.Second):
+		t.Error("expected a removal broadcast for the expired card")
+	}
+}
+
+// TestServer_PostEnvelopeExpiredOnArrivalReturnsImmediately guards
+// fix-postenvelope-blocks-full-ttl-on-expired: an envelope that is already past its
+// ExpiresAt on arrival must return 504 immediately instead of blocking the wrapper
+// for the full server TTL (EnvelopeTTL is 2s in the test harness).
+func TestServer_PostEnvelopeExpiredOnArrivalReturnsImmediately(t *testing.T) {
+	ts, _ := newTestServer(t, "")
+	env := protocol.ApprovalEnvelope{
+		ID: "past-1", AgentID: "a", Prompt: "p",
+		Choices:   []protocol.Choice{{Key: "y"}},
+		ExpiresAt: time.Now().Add(-time.Minute), // already expired on arrival
+	}
+	body, _ := json.Marshal(env)
+	start := time.Now()
+	res, err := http.Post(ts.URL+"/api/envelopes", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer res.Body.Close()
+	elapsed := time.Since(start)
+	if res.StatusCode != http.StatusGatewayTimeout {
+		t.Errorf("status=%d want 504", res.StatusCode)
+	}
+	if elapsed > time.Second {
+		t.Errorf("post blocked %v for an already-expired envelope; want an immediate return (< server TTL)", elapsed)
+	}
+}

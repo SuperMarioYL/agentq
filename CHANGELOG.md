@@ -6,6 +6,32 @@ project loosely follows [SemVer](https://semver.org).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-11
+
+Correctness release. Two fixes that make the daemon honor `ApprovalEnvelope.ExpiresAt`
+consistently across every path (`ListEnvelopes` already treated an expired card as
+dead; the answer and post paths now agree). No new surface; the wire format is
+unchanged.
+
+### Fixed
+- **The daemon no longer accepts an answer for an expired envelope.**
+  `POST /api/queue/:id/answer` never checked `ExpiresAt`, so a late tap on a stale
+  phone/tab was persisted as the audit record — even though the wrapper had already
+  given up at `ExpiresAt` and acted on its default choice, so the recorded human
+  decision never took effect. The protocol states *"The daemon SHOULD NOT accept
+  answers past this time"*, and `ListEnvelopes` already filters expired cards out of
+  the queue; the answer path now agrees, returning `410 Gone` without persisting an
+  answer and broadcasting a removal so every other connected phone drops the dead
+  card.
+- **A wrapper posting an already-expired envelope no longer blocks for the full
+  server TTL.** In `POST /api/envelopes` the remaining-time guard (`d > 0 && d < ttl`)
+  left `ttl` at the default `EnvelopeTTL` (15 min) whenever the envelope arrived
+  already past its `ExpiresAt` (a tight expiry that elapsed in transit, or clock
+  skew), so the wrapper's request hung for the whole TTL on a card that is dead
+  everywhere else. Such an envelope is now short-circuited to an immediate
+  `504 Gateway Timeout` — the same result the wrapper already handles by falling back
+  to its default — without ever entering the live queue.
+
 ## [0.4.0] - 2026-07-05
 
 Platform + integration release: `agentq` now runs on Windows and `agentq wrap`
