@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -544,5 +545,61 @@ func TestServer_PostEnvelopeExpiredOnArrivalReturnsImmediately(t *testing.T) {
 	}
 	if elapsed > time.Second {
 		t.Errorf("post blocked %v for an already-expired envelope; want an immediate return (< server TTL)", elapsed)
+	}
+}
+
+// TestServer_PostEnvelopeTimeoutNoExpiryLeavesStore guards
+// fix-postenvelope-timeout-leaves-noexpiry-card-in-store: an envelope POSTed
+// WITHOUT an expires_at (allowed by the published schema for third-party
+// producers) whose POST times out on the server EnvelopeTTL must be evicted from
+// the store — not left to resurrect in GET /api/queue and the WebSocket bootstrap
+// snapshot forever. ListEnvelopes filters only on ExpiresAt, so before the fix a
+// zero-ExpiresAt dead card lingered indefinitely.
+func TestServer_PostEnvelopeTimeoutNoExpiryLeavesStore(t *testing.T) {
+	store, err := OpenStore(filepath.Join(t.TempDir(), "queue.db"))
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	srv := NewServer(Config{
+		Store:       store,
+		Queue:       NewQueue(),
+		EnvelopeTTL: 60 * time.Millisecond, // short so the POST times out quickly
+	})
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	// No ExpiresAt: the server TTL governs, and on timeout the zero ExpiresAt must
+	// not keep the card alive in the list.
+	env := protocol.ApprovalEnvelope{
+		ID: "noexp-1", AgentID: "a", Prompt: "p",
+		Choices: []protocol.Choice{{Key: "y"}},
+	}
+	body, _ := json.Marshal(env)
+	res, err := http.Post(ts.URL+"/api/envelopes", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	res.Body.Close()
+	if res.StatusCode != http.StatusGatewayTimeout {
+		t.Fatalf("status=%d want 504", res.StatusCode)
+	}
+
+	// The timed-out, unanswered card must be gone from the live queue snapshot.
+	lres, err := http.Get(ts.URL + "/api/queue")
+	if err != nil {
+		t.Fatalf("queue list: %v", err)
+	}
+	defer lres.Body.Close()
+	var list []protocol.ApprovalEnvelope
+	if err := json.NewDecoder(lres.Body).Decode(&list); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(list) != 0 {
+		t.Fatalf("queue=%+v want empty (timed-out no-expiry card must be evicted)", list)
+	}
+	// And directly gone from the store.
+	if _, gerr := store.GetEnvelope("noexp-1"); !errors.Is(gerr, ErrNotFound) {
+		t.Fatalf("GetEnvelope after timeout err=%v want ErrNotFound", gerr)
 	}
 }

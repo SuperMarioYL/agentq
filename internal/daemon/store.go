@@ -77,6 +77,21 @@ func (s *Store) PutEnvelope(env *protocol.ApprovalEnvelope) error {
 	})
 }
 
+// DeleteEnvelope removes the envelope with the given ID from the store. It is
+// idempotent: deleting an absent ID is a no-op that returns nil. Used by the
+// postEnvelope timeout path to evict a dead, unanswered, timed-out card so it
+// stops reappearing in ListEnvelopes and the WebSocket bootstrap snapshot — the
+// store is a queue cache with no retention policy, so an aborted card need not
+// linger. The recorded Answer (if any) is left untouched for audit.
+func (s *Store) DeleteEnvelope(id string) error {
+	if id == "" {
+		return errors.New("daemon: delete envelope without id")
+	}
+	return s.db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket(envelopesBucket).Delete([]byte(id))
+	})
+}
+
 // GetEnvelope returns the envelope with the given ID.
 func (s *Store) GetEnvelope(id string) (*protocol.ApprovalEnvelope, error) {
 	var out protocol.ApprovalEnvelope

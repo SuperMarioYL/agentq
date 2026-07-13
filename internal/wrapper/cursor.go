@@ -142,21 +142,36 @@ func disambiguateKey(letterKey, word string, seen map[string]int) string {
 
 // cursorChoiceLabel maps a parenthesized-letter option to the same
 // human-readable button text DefaultMatcher uses, so the web UI renders
-// Cursor/Aider prompts identically to Claude Code ones. Falls back to the
-// option's own word when it isn't a recognized verb.
+// Cursor/Aider prompts identically to Claude Code ones.
+//
+// The mapping keys off the full option WORD ("Yes", "All", "Skip"), NOT the bare
+// parenthesized letter. Keying off the letter is wrong: two different actions can
+// share a first letter — Aider's "(A)ll" (apply to ALL remaining hunks) and an
+// "(A)lways" (approve-and-remember) both start with 'a', but only the latter is a
+// remember-my-choice action. Labeling "(A)ll" as "Approve and remember" would show
+// a materially misleading button on the phone triage surface. DefaultMatcher's
+// choiceLabel already labels off the full token (so "[y/n/all]" renders "All");
+// this keeps the two matchers consistent. Falls back to the Title-cased word for
+// anything not a recognized verb.
 func cursorChoiceLabel(key, word string) string {
-	switch key {
-	case "y":
+	lw := strings.ToLower(strings.TrimSpace(word))
+	switch lw {
+	case "y", "yes":
 		return "Approve"
-	case "n":
+	case "n", "no":
 		return "Deny"
-	case "a":
+	case "a", "always":
 		return "Approve and remember"
-	case "d":
-		// Aider's "(D)on't ask again" is a deny-and-remember.
-		return "Deny and remember"
-	case "s":
+	case "all":
+		return "All"
+	case "s", "skip":
 		return "Skip"
+	}
+	// Aider's "(D)on't ask again" is a deny-and-remember. Recognize it by the word
+	// prefix, not the bare "d" key, so an unrelated d-word (e.g. "(D)iff") is not
+	// silently relabeled as a remember-my-choice action.
+	if strings.HasPrefix(lw, "don't") || strings.HasPrefix(lw, "dont") {
+		return "Deny and remember"
 	}
 	if word == "" {
 		return strings.ToUpper(key)

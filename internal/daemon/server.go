@@ -214,9 +214,14 @@ func (s *Server) postEnvelope(c echo.Context) error {
 	ans, err := s.cfg.Queue.Wait(ctx, env.ID)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-			// The wrapper gave up (envelope expired / TTL elapsed). Tell every
-			// connected phone to drop the now-dead card so it does not linger in
-			// the live queue; ListEnvelopes also filters it out on the next poll.
+			// The wrapper gave up (envelope expired / TTL elapsed). Evict the dead
+			// card from the store so it does not linger: ListEnvelopes only filters
+			// on ExpiresAt, so an envelope POSTed WITHOUT an expires_at (allowed by
+			// the published schema for third-party producers) would otherwise be
+			// resurrected in GET /api/queue and the WebSocket bootstrap snapshot for
+			// every (re)connecting phone forever. Then tell every connected phone to
+			// drop the now-dead card.
+			_ = s.cfg.Store.DeleteEnvelope(env.ID)
 			s.cfg.Queue.BroadcastRemoved(env.ID)
 			return echo.NewHTTPError(http.StatusGatewayTimeout, "no answer within ttl")
 		}

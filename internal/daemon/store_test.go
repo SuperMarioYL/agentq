@@ -38,6 +38,31 @@ func TestStore_PutGetEnvelope(t *testing.T) {
 	}
 }
 
+func TestStore_DeleteEnvelope(t *testing.T) {
+	s := newTestStore(t)
+	env := &protocol.ApprovalEnvelope{
+		ID: "del-1", AgentID: "a", Prompt: "ok?",
+		Choices: []protocol.Choice{{Key: "y", Label: "Approve", IsDefault: true}},
+	}
+	if err := s.PutEnvelope(env); err != nil {
+		t.Fatalf("PutEnvelope: %v", err)
+	}
+	if err := s.DeleteEnvelope("del-1"); err != nil {
+		t.Fatalf("DeleteEnvelope: %v", err)
+	}
+	if _, err := s.GetEnvelope("del-1"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("GetEnvelope after delete err=%v want ErrNotFound", err)
+	}
+	// Idempotent: deleting an absent ID is a no-op, not an error.
+	if err := s.DeleteEnvelope("del-1"); err != nil {
+		t.Errorf("second DeleteEnvelope err=%v want nil (idempotent)", err)
+	}
+	// An empty ID is rejected.
+	if err := s.DeleteEnvelope(""); err == nil {
+		t.Error("DeleteEnvelope(\"\") err=nil want error")
+	}
+}
+
 func TestStore_GetMissing(t *testing.T) {
 	s := newTestStore(t)
 	_, err := s.GetEnvelope("none")

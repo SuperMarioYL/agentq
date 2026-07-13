@@ -1,6 +1,10 @@
 package wrapper
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/SuperMarioYL/agentq/internal/protocol"
+)
 
 func TestCursorMatcher_AiderApplyEdit(t *testing.T) {
 	env, ok := CursorMatcher("Apply edit to main.py? (Y)es/(N)o/(D)on't ask again [Yes]", "")
@@ -115,6 +119,48 @@ func TestCursorMatcher_TripleCollisionStillUnique(t *testing.T) {
 	}
 	if len(seen) != len(env.Choices) {
 		t.Errorf("keys not all unique: %+v", env.Choices)
+	}
+}
+
+// TestCursorMatcher_LabelsFromWordNotFirstLetter guards
+// fix-cursormatcher-mislabels-option-from-first-letter: the button label must be
+// derived from the option WORD, not the bare parenthesized letter. Aider's "(A)ll"
+// (apply to all remaining) shares its first letter with the approve-and-remember
+// convention but is a different action, so it must render "All" — not the
+// misleading "Approve and remember" the old letter-keyed mapping produced. Yes/No
+// keep their verbs and "(D)on't ask again" stays a deny-and-remember.
+func TestCursorMatcher_LabelsFromWordNotFirstLetter(t *testing.T) {
+	env, ok := CursorMatcher("Apply this change? (Y)es/(N)o/(A)ll/(S)kip [Yes]", "")
+	if !ok || env == nil {
+		t.Fatal("expected match")
+	}
+	byKey := map[string]protocol.Choice{}
+	for _, c := range env.Choices {
+		byKey[c.Key] = c
+	}
+	want := map[string]string{
+		"y": "Approve",
+		"n": "Deny",
+		"a": "All", // NOT "Approve and remember" — that would be a misleading button
+		"s": "Skip",
+	}
+	for k, wantLabel := range want {
+		c, present := byKey[k]
+		if !present {
+			t.Fatalf("choice key %q missing from %+v", k, env.Choices)
+		}
+		if c.Label != wantLabel {
+			t.Errorf("choice %q label=%q want %q", k, c.Label, wantLabel)
+		}
+	}
+
+	// The documented Aider deny-and-remember stays correct (matched by word, not key).
+	env2, ok := CursorMatcher("Apply edit? (Y)es/(N)o/(D)on't ask again [Yes]", "")
+	if !ok || env2 == nil || len(env2.Choices) != 3 {
+		t.Fatalf("aider prompt: ok=%v env=%+v", ok, env2)
+	}
+	if env2.Choices[2].Label != "Deny and remember" {
+		t.Errorf("(D)on't ask again label=%q want %q", env2.Choices[2].Label, "Deny and remember")
 	}
 }
 

@@ -6,6 +6,32 @@ project loosely follows [SemVer](https://semver.org).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-07-14
+
+Correctness release. Two fixes that make dead cards leave the queue everywhere and
+keep the phone's button labels truthful. The `ApprovalEnvelope` wire format is
+unchanged; only a display label is corrected.
+
+### Fixed
+
+- **A timed-out envelope posted without an `expires_at` no longer lingers in the
+  queue.** The v0.4 stale-card cleanup only covered envelopes with an `expires_at`
+  (`ListEnvelopes` filters those, and the post path already broadcasts a removal to
+  live clients). But the published schema marks `expires_at` optional, so a
+  third-party producer can `POST /api/envelopes` without one; when that request
+  timed out on the server TTL the card stayed in the store with a zero expiry and
+  kept reappearing in `GET /api/queue` and the WebSocket bootstrap snapshot for
+  every phone that reconnected. The post-timeout path now evicts the dead,
+  unanswered card from the store (new `Store.DeleteEnvelope`) in addition to
+  broadcasting its removal, so it leaves the queue for good.
+- **Cursor/Aider prompt buttons are now labeled from the option word, not its first
+  letter.** The parenthesized-prompt matcher derived a choice's button text from the
+  bare letter in `(X)`, so Aider's `(A)ll` (apply to all remaining) was shown as
+  "Approve and remember" — a different, misleading action that happens to share the
+  letter 'a'. Labels are now taken from the full option word (matching the bracketed
+  `[y/n/all]` matcher), so `(A)ll` reads "All" while `(Y)es`/`(N)o`/`(D)on't ask
+  again` keep their meanings. Choice keys and the wire format are unchanged.
+
 ## [0.5.0] - 2026-07-11
 
 Correctness release. Two fixes that make the daemon honor `ApprovalEnvelope.ExpiresAt`
