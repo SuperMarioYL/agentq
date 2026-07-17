@@ -7,16 +7,16 @@
   "accent": ["#43b98d"],
   "hero": {
     "eyebrow": {
-      "zh": "开源 · 单二进制 · 本地 LAN",
-      "en": "Open source · Single binary · Local LAN"
+      "zh": "开源 · 全本地 · 手机审批",
+      "en": "Open source · Fully local · Phone approvals"
     },
     "headline": {
-      "zh": "N 个 Coding Agent 的审批\n收敛进一个手机队列",
-      "en": "N coding agents' approvals\nfunnel into one phone queue"
+      "zh": "几个 Agent 同时停下问你\n全收进手机一个队列",
+      "en": "Several agents stop and ask at once\n— all into one phone queue"
     },
     "sub": {
-      "zh": "agentq wrap 套住每个会话，把审批提示按 ULID 排成一次只放一个的队列，扫码即可在手机上排空——不用再 alt-tab 找哪个 Agent 在等你。",
-      "en": "agentq wrap sniffs each session and orders every approval prompt into a one-at-a-time ULID queue you drain from your phone by scanning a QR — no more alt-tabbing to find which agent is waiting."
+      "zh": "它把每个 Agent 的审批提示聚拢成手机上一个按先后排好的队列，一次只放一个——扫码就能在手机上逐条答复，不用再 alt-tab 找哪个 Agent 在等你。",
+      "en": "It gathers every agent's approval prompts into one ordered queue on your phone, one at a time — scan a QR and answer them from your phone, no more alt-tabbing to find which agent is waiting."
     },
     "command": "agentq wrap --daemon -- claude",
     "cta": { "zh": "在 GitHub 上开始", "en": "Get started on GitHub" },
@@ -25,46 +25,46 @@
   },
   "advantages": [
     {
-      "title": { "zh": "N 个会话 → 一个队列", "en": "N sessions → one queue" },
+      "title": { "zh": "几个 Agent 抢着问 → 手机排一条队", "en": "Several agents asking at once → one phone queue" },
       "body": {
-        "zh": "四个 tmux 面板里的 Claude Code 不再各自打断你——agentq 把它们的审批收敛成手机上一个按 ULID 排序、一次只放一个的队列，每条按 Agent 标记，扫一眼就知道该回答谁。",
-        "en": "Four Claude Code panes stop interrupting you one at a time — agentq funnels their prompts into a single ULID-ordered, one-at-a-time queue on your phone, each tagged by agent so a glance tells you who to answer."
+        "zh": "四个终端里的 Agent 不再各自打断你——所有审批提示聚拢成手机上一个按先后排好的队列，一次只放一个，每条标着是哪个 Agent，扫一眼就知道该回答谁。",
+        "en": "Four agents in four terminals stop interrupting you one at a time — every prompt gathers into one ordered queue on your phone, one at a time, each tagged with which agent, so a glance tells you who to answer."
       },
-      "chips": ["› ULID 有序队列", "› 一次只放一个", "› 按 Agent 标记"]
+      "chips": ["› 按先后排队", "› 一次只放一个", "› 标着是哪个 Agent"]
     },
     {
-      "title": { "zh": "认得 Claude Code、Cursor、Aider", "en": "Speaks Claude Code, Cursor, Aider" },
+      "title": { "zh": "认得你用的每一个 Agent", "en": "Speaks every agent you use" },
       "body": {
-        "zh": "agentq wrap 是一层很薄的 pty + stdio 嗅探器，--agent auto 同时识别 Claude Code 的方括号提示与 Cursor / Aider 的 (Y)es/(N)o 提示；接入一个新 Agent 只是再写一个适配器。",
-        "en": "agentq wrap is a thin pty + stdio sniffer; --agent auto recognizes both Claude Code's bracket prompts and the (Y)es/(N)o dialect used by Cursor and Aider — adding a new agent is just one more adapter."
+        "zh": "Claude Code 的方括号提示、Cursor 和 Aider 的 (Y)es/(N)o 提示，它都认得——不用为换个 Agent 就重学一遍；想接新 Agent，加个适配就行。",
+        "en": "Claude Code's bracket prompts, Cursor and Aider's (Y)es/(N)o dialect — it understands all of them, so switching agents doesn't mean relearning; adding a new one is just one adapter."
       },
-      "chips": ["› pty + stdio 嗅探", "› --agent auto 双方言", "› 适配器可扩展"]
+      "chips": ["› 认得多种提问格式", "› 自动识别 Agent", "› 加新 Agent 很轻"]
     },
     {
-      "title": { "zh": "开放的 ApprovalEnvelope 协议", "en": "Open ApprovalEnvelope protocol" },
+      "title": { "zh": "开放协议，谁都能接进来", "en": "Open protocol — any tool can plug in" },
       "body": {
-        "zh": "运行中的守护进程在 GET /schema/approval-envelope.json 上无鉴权发布协议契约；任何 Agent 运行时都能照 schema 校验后直接 POST /api/envelopes 进队列，完全不必让 wrap 去拦截 stdio。",
-        "en": "The running daemon publishes its contract token-free at GET /schema/approval-envelope.json; any agent runtime can validate against the schema and POST /api/envelopes straight into the queue — no stdio scraping required."
+        "zh": "运行中的它会公开审批请求的格式约定——任何 Agent 运行时照着校验自己的输出，就能直接把审批塞进你手机上的同一个队列，不必非得让它去拦终端。",
+        "en": "While running, it publishes the approval request format openly — any agent runtime can validate its own output against it and post approvals straight into the same queue on your phone, without scraping your terminal."
       },
-      "chips": ["› JSON Schema 契约", "› POST /api/envelopes", "› WebSocket 事件流"]
+      "chips": ["› 协议公开可查", "› 任何工具可接入", "› 实时推送"]
     },
     {
-      "title": { "zh": "全程本地，单二进制", "en": "All local, single binary" },
+      "title": { "zh": "审批不出本机，不上云", "en": "Approvals stay on your machine — no cloud" },
       "body": {
-        "zh": "serve、wrap、attach 三个进程都跑在你自己的机器上：单文件 Go 二进制绑定 127.0.0.1:7777，用 bbolt 持久化，attach 打印本机 LAN 二维码——没有 Docker、没有 SaaS、没有外部数据库。",
-        "en": "serve, wrap, and attach all run on your own machine: one static Go binary binds 127.0.0.1:7777, persists to bbolt, and attach prints a LAN QR — no Docker, no SaaS, no external database."
+        "zh": "所有进程都跑在你自己的机器上：扫个码就能在手机上审批，审批记录也留在本机——没有 Docker、没有云服务、没有外部数据库。",
+        "en": "Every process runs on your own machine: scan a QR to approve from your phone, with records staying on your machine — no Docker, no cloud service, no external database."
       },
-      "chips": ["› 127.0.0.1:7777", "› bbolt 持久化", "› 无 Docker / SaaS"]
+      "chips": ["› 只听本机", "› 记录留本机", "› 无 Docker / 云"]
     }
   ],
   "scene": { "kind": "hub-nodes", "nodes": ["Claude Code", "Cursor", "Aider"] },
   "cta": {
-    "headline": { "zh": "别再 alt-tab 你的 Agent", "en": "Stop alt-tabbing your agents" },
+    "headline": { "zh": "别再 alt-tab 找你的 Agent", "en": "Stop alt-tabbing to find your agents" },
     "sub": {
-      "zh": "一条命令装上，扫个码，审批就都在手机上了。MIT 开源，单文件 Go 二进制。",
-      "en": "One command to install, one QR to scan, and every approval lives on your phone. MIT-licensed, a single Go binary."
+      "zh": "一条命令装上，扫个码，审批就都在手机上了。MIT 开源，全程本地。",
+      "en": "One command to install, one QR to scan, and every approval lives on your phone. MIT-licensed, fully local."
     },
     "button": { "zh": "在 GitHub 上开始", "en": "Get started on GitHub" }
   },
-  "footer": { "tag": { "zh": "MIT 开源 · 单文件 Go 二进制", "en": "MIT open source · single Go binary" } }
+  "footer": { "tag": { "zh": "MIT 开源 · 全程本地", "en": "MIT open source · fully local" } }
 }
