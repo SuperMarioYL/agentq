@@ -211,7 +211,7 @@ First public preview. Covers the three milestones from the original MVP plan.
 - `ApprovalEnvelope` wire format (`internal/protocol/approval.go`) — the
   public v0.1 schema other agent runtimes can target.
 - Bilingual READMEs (Chinese primary, English sibling), CI workflow on
-  Ubuntu + macOS, MIT LICENSE.
+  Ubuntu + macOS, Apache 2.0 LICENSE.
 
 ### Known limitations
 
