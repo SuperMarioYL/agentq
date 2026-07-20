@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <a href="./LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-6ea8ff?style=flat-square"></a>
+  <a href="./LICENSE"><img alt="Apache License 2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square"></a>
   <a href="https://go.dev/"><img alt="Go 1.24" src="https://img.shields.io/badge/go-1.24-00ADD8?style=flat-square&logo=go&logoColor=white"></a>
   <a href="https://github.com/SuperMarioYL/agentq/releases"><img alt="status" src="https://img.shields.io/badge/release-v0.6.0-51d1a3?style=flat-square"></a>
   <a href="#"><img alt="Claude Code" src="https://img.shields.io/badge/Claude%20Code-ready-7c5cff?style=flat-square"></a>
@@ -132,7 +132,7 @@ agentq attach --token <粘 token>
 
 ## 协议与贡献
 
-MIT。问题、想法、协议讨论一律走 [Issues](https://github.com/SuperMarioYL/agentq/issues)；想加新 Agent 适配器就直接发 PR，`ApprovalEnvelope` 一旦公开就是大家的协议。
+Apache 2.0。问题、想法、协议讨论一律走 [Issues](https://github.com/SuperMarioYL/agentq/issues)；想加新 Agent 适配器就直接发 PR，`ApprovalEnvelope` 一旦公开就是大家的协议。
 
 推送仓库后建议加 topic：
 
