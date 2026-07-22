@@ -1,5 +1,7 @@
 {
   "schema": 1,
+  "content_version": "v0.7.0",
+  "generated_at": "2026-07-23",
   "name": "agentq",
   "github": "https://github.com/SuperMarioYL/agentq",
   "host": "agentq.lei6393.com",
@@ -61,10 +63,10 @@
   "cta": {
     "headline": { "zh": "别再 alt-tab 找你的 Agent", "en": "Stop alt-tabbing to find your agents" },
     "sub": {
-      "zh": "一条命令装上，扫个码，审批就都在手机上了。MIT 开源，全程本地。",
-      "en": "One command to install, one QR to scan, and every approval lives on your phone. MIT-licensed, fully local."
+      "zh": "一条命令装上，扫个码，审批就都在手机上了。Apache-2.0 开源，全程本地。",
+      "en": "One command to install, one QR to scan, and every approval lives on your phone. Apache-2.0 licensed, fully local."
     },
     "button": { "zh": "在 GitHub 上开始", "en": "Get started on GitHub" }
   },
-  "footer": { "tag": { "zh": "MIT 开源 · 全程本地", "en": "MIT open source · fully local" } }
+  "footer": { "tag": { "zh": "Apache-2.0 开源 · 全程本地", "en": "Apache-2.0 open source · fully local" } }
 }
