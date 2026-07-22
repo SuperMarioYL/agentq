@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <a href="./LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-6ea8ff?style=flat-square"></a>
+  <a href="./LICENSE"><img alt="Apache License 2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square"></a>
   <a href="https://go.dev/"><img alt="Go 1.24" src="https://img.shields.io/badge/go-1.24-00ADD8?style=flat-square&logo=go&logoColor=white"></a>
   <a href="https://github.com/SuperMarioYL/agentq/releases"><img alt="status" src="https://img.shields.io/badge/release-v0.6.0-51d1a3?style=flat-square"></a>
   <a href="#"><img alt="Claude Code" src="https://img.shields.io/badge/Claude%20Code-ready-7c5cff?style=flat-square"></a>
@@ -134,7 +134,7 @@ Different ends of the same plumbing — both worth running.
 
 ## License & contributing
 
-MIT. Open an [issue](https://github.com/SuperMarioYL/agentq/issues) for bugs, ideas, or protocol discussion; send a PR if you have an adapter for another Coding Agent — once `ApprovalEnvelope` is public it belongs to everyone.
+Apache 2.0. Open an [issue](https://github.com/SuperMarioYL/agentq/issues) for bugs, ideas, or protocol discussion; send a PR if you have an adapter for another Coding Agent — once `ApprovalEnvelope` is public it belongs to everyone.
 
 After you push, set repo topics:
 

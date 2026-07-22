@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"strings"
 	"sync"
@@ -211,9 +212,15 @@ func TestWrapperProcess_ErrorPaths(t *testing.T) {
 		wantErrSubs string
 	}{
 		{
-			name:        "answer_id_mismatch",
+			// fix-awaitanswer-leaked-decode-goroutine changed the semantics: an
+			// answer whose EnvelopeID does not match the pending envelope is now
+			// DROPPED as stale (the wrapper keeps waiting) instead of crashing
+			// with "does not match pending". With no further answer on the
+			// source, the long-lived reader then hits EOF and the read surfaces
+			// as a "read answer for <id>" error — the new expected behavior.
+			name:        "stale_answer_dropped_then_source_eof",
 			answers:     strings.NewReader(`{"envelope_id":"OTHER","choice_key":"y"}` + "\n"),
-			wantErrSubs: "does not match pending",
+			wantErrSubs: "read answer for",
 		},
 		{
 			name:        "unknown_choice_key",
@@ -561,5 +568,79 @@ func TestNewULID_ConcurrentMonotonic(t *testing.T) {
 	}
 	if len(seen) != goroutines*per {
 		t.Fatalf("got %d unique IDs want %d", len(seen), goroutines*per)
+	}
+}
+
+// TestWrapperProcess_SecondPromptAfterTimeoutNoCrash guards
+// fix-awaitanswer-leaked-decode-goroutine: when a prompt times out (no human
+// answer) and a second prompt follows, the wrapper must NOT spawn a second
+// decoder goroutine racing the first on the same *json.Decoder. A late answer
+// to the timed-out first prompt must be DROPPED as stale (no
+// EnvelopeID-mismatch crash), and the second prompt's real answer must be
+// received and forwarded — no crash. The buggy per-call `go func(){ dec.Decode
+// }()` leaked a parked decoder on the first timeout and let the second
+// prompt's awaitAnswer spawn a second decoder on the same *json.Decoder, a
+// data race on its internal buffer/scan state (run under -race to surface it).
+func TestWrapperProcess_SecondPromptAfterTimeoutNoCrash(t *testing.T) {
+	// Two prompts back-to-back; both default to N ([y/N]).
+	childOut := strings.NewReader("Allow? [y/N]\nProceed? [y/N]\n")
+
+	// Answer source is a pipe the test writes to with controlled timing: a
+	// STALE answer for prompt 1 arrives well after prompt 1 has timed out
+	// (so it must be dropped), then the real answer for prompt 2 — delivered
+	// before prompt 2's own (later) expiry so the answer path is exercised.
+	pr, pw := io.Pipe()
+
+	var idCount int
+	mkID := func() string {
+		idCount++
+		return fmt.Sprintf("ID-%d", idCount)
+	}
+
+	// Real advancing clock + 500ms expiry: prompt 1 is minted at T0 with
+	// ExpiresAt=T0+500ms (times out at T0+500ms), and prompt 2 — matched only
+	// AFTER prompt 1's timeout — is minted at T0+500ms with ExpiresAt=T0+1000ms.
+	// So the stale ID-1 (written at ~600ms) lands after prompt 1 timed out but
+	// the real ID-2 (written at ~650ms) lands well before prompt 2's timeout,
+	// exercising the "drop stale, accept matching" path instead of a 2nd timeout.
+	w := &Wrapper{
+		Cmd:         []string{"x"},
+		AgentID:     "x-1", // set explicitly so applyDefaults does not consume a NewID call
+		EnvelopeOut: io.Discard,
+		AnswerIn:    pr,
+		Stdout:      io.Discard,
+		Expiry:      500 * time.Millisecond,
+		Now:         time.Now, // real advancing clock so the two prompts get distinct expiries
+		NewID:       mkID,
+	}
+
+	var childIn bytes.Buffer
+	procDone := make(chan error, 1)
+	go func() { procDone <- w.Process(context.Background(), childOut, &childIn) }()
+
+	// Wait past prompt 1's 500ms expiry so the stale answer below lands AFTER
+	// awaitAnswer1 returned the default and Process is parked in awaitAnswer2 —
+	// the exact race window the buggy per-call goroutine hit.
+	time.Sleep(600 * time.Millisecond)
+
+	// Stale answer for the timed-out prompt 1 — under the buggy per-call
+	// goroutine this raced a second decoder on the same *json.Decoder and
+	// either crashed with an EnvelopeID-mismatch or silently mis-routed.
+	_, _ = pw.Write([]byte(`{"envelope_id":"ID-1","choice_key":"y"}` + "\n"))
+	time.Sleep(50 * time.Millisecond)
+	// Real answer for prompt 2 (still live: its 1000ms expiry is well away).
+	_, _ = pw.Write([]byte(`{"envelope_id":"ID-2","choice_key":"y"}` + "\n"))
+	_ = pw.Close()
+
+	select {
+	case err := <-procDone:
+		if err != nil {
+			t.Fatalf("Process returned error (bug: stale answer crashed wrapper): %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Process did not return (bug: second prompt's answer never received)")
+	}
+	if got, want := childIn.String(), "n\ny\n"; got != want {
+		t.Errorf("childIn=%q want %q (prompt1 default n + prompt2 real answer y)", got, want)
 	}
 }

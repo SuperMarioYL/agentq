@@ -77,6 +77,29 @@ type Wrapper struct {
 	// Process callers (tests) that drive childOut/childIn themselves.
 	childDone <-chan struct{}
 
+	// pendingMu guards the currently-pending answer slot used by the
+	// long-lived answer-reader goroutine (fix-awaitanswer-leaked-decode-goroutine):
+	// pendingID is the envelope a call to awaitAnswer is currently waiting on,
+	// and pendingCh is the per-prompt channel a decoded Answer is routed to.
+	// Both are zero when no prompt is awaiting an answer. One reader goroutine
+	// owns answerDec.Decode for the whole Process loop and routes each decoded
+	// Answer here by EnvelopeID, so the decoder's internal buffer/scan state is
+	// never used concurrently (the data race the old per-call goroutine caused).
+	//
+	// bufferedAns / bufferedErr hold a decoded Answer (or a terminal decode
+	// error such as EOF) that arrived while NO awaitAnswer was pending — e.g. an
+	// answer pre-loaded into a finite reader before the first prompt matched,
+	// or a late reply to a prompt that already timed out between awaitAnswer
+	// calls. The next awaitAnswer consumes them: a matching Answer is used
+	// directly, a non-matching Answer is dropped as stale, and a buffered
+	// terminal error is surfaced immediately so a drained source does not make
+	// the wrapper wait out the full envelope expiry.
+	pendingMu    sync.Mutex
+	pendingID    string
+	pendingCh    chan decodedAnswer
+	bufferedAns  *protocol.Answer
+	bufferedErr  error
+
 	sessionStarted time.Time
 	contextBuf     []string
 	mu             sync.Mutex
@@ -209,6 +232,15 @@ func (w *Wrapper) Process(ctx context.Context, childOut io.Reader, childIn io.Wr
 	var answerDec *json.Decoder
 	if w.AnswerIn != nil {
 		answerDec = json.NewDecoder(w.AnswerIn)
+		// One long-lived answer-reader goroutine for the whole loop owns
+		// answerDec.Decode and routes each decoded Answer to the
+		// currently-pending awaitAnswer, dropping stale answers (EnvelopeID
+		// != pending) so a late reply to a timed-out prompt can neither race
+		// the next prompt's decode on the same *json.Decoder nor trip the
+		// EnvelopeID-mismatch crash. This replaces the per-call goroutine that
+		// leaked a parked decoder on every ctx/expiry/child-done return.
+		// (fix-awaitanswer-leaked-decode-goroutine)
+		go w.runAnswerReader(answerDec)
 	}
 
 	for scanner.Scan() {
@@ -235,7 +267,7 @@ func (w *Wrapper) Process(ctx context.Context, childOut io.Reader, childIn io.Wr
 			return ErrNoAnswerSource
 		}
 
-		key, err := w.awaitAnswer(ctx, answerDec, env)
+		key, err := w.awaitAnswer(ctx, env)
 		if err != nil {
 			return err
 		}
@@ -253,19 +285,55 @@ type decodedAnswer struct {
 	err error
 }
 
-// awaitAnswer reads the next Answer for env, but never blocks indefinitely: the
-// decode runs in a goroutine and awaitAnswer selects over {answer, ctx.Done(),
-// envelope-expiry timer, child-exit}. On ctx cancellation (Ctrl-C/SIGTERM),
-// envelope expiry (the ExpiresAt "give up and abort" contract), or child death,
-// it forwards the IsDefault choice — the same fallback the wrapper's timeout
-// contract promises — instead of parking on stdin until kill -9.
-func (w *Wrapper) awaitAnswer(ctx context.Context, dec *json.Decoder, env *protocol.ApprovalEnvelope) (string, error) {
-	ansCh := make(chan decodedAnswer, 1)
-	go func() {
-		var a protocol.Answer
-		err := dec.Decode(&a)
-		ansCh <- decodedAnswer{ans: a, err: err}
-	}()
+// awaitAnswer waits for the answer-reader goroutine to route the Answer for env,
+// selecting over {routed answer, ctx.Done, envelope-expiry timer, child-exit} so
+// the read is cancellable on Ctrl-C, envelope expiry, and child death — it never
+// blocks indefinitely on stdin. It registers env as the currently-pending
+// envelope (tracked under w.pendingMu) so the single long-lived reader can route
+// the matching Answer here; a stale answer (a late reply to an already-timed-out
+// prompt) is dropped by the reader and never reaches this select.
+//
+// There is no per-call decoder goroutine: the reader owns answerDec.Decode for
+// the whole Process loop, which closes both the data race on the decoder's
+// internal buffer/scan state and the stale-answer EnvelopeID-mismatch crash
+// that the old per-call goroutine caused when a prompt timed out and a second
+// prompt followed (fix-awaitanswer-leaked-decode-goroutine).
+func (w *Wrapper) awaitAnswer(ctx context.Context, env *protocol.ApprovalEnvelope) (string, error) {
+	// Register as the current pending so the long-lived answer reader routes
+	// the next matching Answer to ch. Cap-1 buffered so a racing late answer
+	// (decoded just before we clear the slot on a timeout) never blocks the
+	// reader. Cleared on every return path below.
+	ch := make(chan decodedAnswer, 1)
+	w.pendingMu.Lock()
+	// If the reader already decoded something before we registered (an answer
+	// pre-loaded into a finite reader, or a late reply that landed between
+	// awaitAnswer calls), consume it now: a matching Answer short-circuits, a
+	// non-matching Answer is dropped as stale, and a buffered terminal error
+	// (EOF) is surfaced immediately instead of waiting out the full expiry.
+	var pre decodedAnswer
+	havePre := false
+	if w.bufferedAns != nil {
+		if w.bufferedAns.EnvelopeID == env.ID {
+			pre = decodedAnswer{ans: *w.bufferedAns}
+			havePre = true
+		}
+		w.bufferedAns = nil
+	}
+	if !havePre && w.bufferedErr != nil {
+		pre = decodedAnswer{err: w.bufferedErr}
+		havePre = true
+		w.bufferedErr = nil
+	}
+	w.pendingID = env.ID
+	w.pendingCh = ch
+	w.pendingMu.Unlock()
+	defer w.clearPending(ch)
+
+	if havePre {
+		// A decoded result was already waiting for a waiter; resolve it without
+		// entering the select (and without arming the expiry timer).
+		return w.resolveAnswer(env, pre)
+	}
 
 	// Timer for the envelope's own expiry. A zero/absent ExpiresAt means "no
 	// wrapper-side deadline" — leave the timer channel nil so the select ignores
@@ -285,17 +353,8 @@ func (w *Wrapper) awaitAnswer(ctx context.Context, dec *json.Decoder, env *proto
 	}
 
 	select {
-	case res := <-ansCh:
-		if res.err != nil {
-			return "", fmt.Errorf("wrapper: read answer for %s: %w", env.ID, res.err)
-		}
-		if res.ans.EnvelopeID != env.ID {
-			return "", fmt.Errorf("wrapper: answer envelope_id=%q does not match pending=%q", res.ans.EnvelopeID, env.ID)
-		}
-		if !choiceExists(env.Choices, res.ans.ChoiceKey) {
-			return "", fmt.Errorf("wrapper: choice %q not in envelope %s", res.ans.ChoiceKey, env.ID)
-		}
-		return res.ans.ChoiceKey, nil
+	case res := <-ch:
+		return w.resolveAnswer(env, res)
 	case <-ctx.Done():
 		return w.abortKey(env, "context cancelled")
 	case <-expiryCh:
@@ -303,6 +362,96 @@ func (w *Wrapper) awaitAnswer(ctx context.Context, dec *json.Decoder, env *proto
 	case <-w.childDoneCh():
 		return w.abortKey(env, "child process exited")
 	}
+}
+
+// resolveAnswer validates one decoded Answer against the pending envelope and
+// returns the choice key to forward to the child, or an error. A mismatched
+// EnvelopeID is treated as a stale answer: the reader already filters by ID
+// before routing, so this is a defensive guard against a future regression in
+// the reader's routing, surfaced explicitly instead of silently mis-forwarding.
+func (w *Wrapper) resolveAnswer(env *protocol.ApprovalEnvelope, res decodedAnswer) (string, error) {
+	if res.err != nil {
+		return "", fmt.Errorf("wrapper: read answer for %s: %w", env.ID, res.err)
+	}
+	if res.ans.EnvelopeID != env.ID {
+		return "", fmt.Errorf("wrapper: answer envelope_id=%q does not match pending=%q", res.ans.EnvelopeID, env.ID)
+	}
+	if !choiceExists(env.Choices, res.ans.ChoiceKey) {
+		return "", fmt.Errorf("wrapper: choice %q not in envelope %s", res.ans.ChoiceKey, env.ID)
+	}
+	return res.ans.ChoiceKey, nil
+}
+
+// runAnswerReader is the single, long-lived goroutine that decodes Answers from
+// answerDec for the whole Process loop. It owns answerDec.Decode — no other
+// goroutine calls Decode, so the decoder's internal buffer/scan state is never
+// used concurrently (the data race the old per-call goroutine caused when a
+// prompt timed out and the next prompt spawned a second decoder on the same
+// *json.Decoder). Each decoded Answer is routed to the currently-pending
+// awaitAnswer via w.pendingCh; an answer whose EnvelopeID does not match the
+// pending envelope (a late reply to a prompt that already timed out) is DROPPED
+// as stale so it can neither race the next prompt's decode nor trip the
+// EnvelopeID-mismatch crash. An answer (or terminal decode error) that lands
+// while NO waiter is pending is buffered for the next awaitAnswer, so a
+// finite/pre-loaded answer source still works and a drained source surfaces
+// immediately instead of making the wrapper wait out the full expiry.
+//
+// The goroutine exits when Decode returns an error (EOF when the answer source
+// is closed, or a malformed-JSON error): the error is forwarded to a live
+// waiter if one exists, otherwise buffered (or dropped if already buffered) and
+// the reader stops.
+func (w *Wrapper) runAnswerReader(dec *json.Decoder) {
+	for {
+		var a protocol.Answer
+		err := dec.Decode(&a)
+		w.pendingMu.Lock()
+		ch := w.pendingCh
+		id := w.pendingID
+		if err != nil {
+			// Source exhausted or malformed: forward to a live waiter so it can
+			// surface the error; if no one is waiting, park it for the next
+			// awaitAnswer (overwriting nothing — a buffered Answer already
+			// consumed by then takes precedence via awaitAnswer's check order).
+			if ch != nil {
+				select {
+				case ch <- decodedAnswer{ans: a, err: err}:
+				default:
+				}
+			} else {
+				w.bufferedErr = err
+			}
+			w.pendingMu.Unlock()
+			return
+		}
+		if ch != nil {
+			// A waiter is live: route only if the EnvelopeID matches. A stale
+			// answer (wrong ID) is dropped here and the loop decodes the next —
+			// it is never buffered, because the live waiter will only ever
+			// accept the answer it is pending on.
+			if a.EnvelopeID == id {
+				select {
+				case ch <- decodedAnswer{ans: a, err: nil}:
+				default:
+				}
+			}
+		} else {
+			// No waiter yet (answer pre-loaded, or landed between awaitAnswer
+			// calls): park it for the next awaitAnswer to consume by ID.
+			w.bufferedAns = &a
+		}
+		w.pendingMu.Unlock()
+	}
+}
+
+// clearPending relinquishes the currently-pending slot iff it still points at ch,
+// so a later awaitAnswer's registration is never clobbered by a stale return.
+func (w *Wrapper) clearPending(ch chan decodedAnswer) {
+	w.pendingMu.Lock()
+	if w.pendingCh == ch {
+		w.pendingCh = nil
+		w.pendingID = ""
+	}
+	w.pendingMu.Unlock()
 }
 
 // childDoneCh returns the child-exit channel, or a nil channel (which blocks

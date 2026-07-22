@@ -159,7 +159,17 @@ func (s *Server) authMiddleware(next echo.HandlerFunc) echo.HandlerFunc {
 		got := c.QueryParam("t")
 		if got == "" {
 			h := c.Request().Header.Get("Authorization")
-			got = strings.TrimPrefix(h, "Bearer ")
+			// RFC 7235: the auth-scheme token is case-insensitive, so a
+			// conforming client may send "bearer <token>" (lowercase scheme).
+			// The old strings.TrimPrefix(h, "Bearer ") was case-sensitive and
+			// left got="bearer <token>", so ConstantTimeCompare failed and the
+			// request was rejected with 401 — exactly the interop the public
+			// ApprovalEnvelope schema (POST /api/envelopes) is meant to enable.
+			// Split scheme + token and compare the scheme case-insensitively
+			// before the constant-time token compare. (fix-auth-bearer-scheme-case-sensitive)
+			if scheme, rest, ok := strings.Cut(h, " "); ok && strings.EqualFold(scheme, "Bearer") {
+				got = strings.TrimSpace(rest)
+			}
 		}
 		if subtle.ConstantTimeCompare([]byte(got), []byte(s.cfg.Token)) != 1 {
 			return echo.NewHTTPError(http.StatusUnauthorized, "missing or invalid token")

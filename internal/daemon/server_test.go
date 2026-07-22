@@ -80,6 +80,26 @@ func TestServer_QueueAcceptsTokenViaHeader(t *testing.T) {
 	}
 }
 
+// TestServer_QueueAcceptsLowercaseBearerScheme guards fix-auth-bearer-scheme-case-sensitive:
+// RFC 7235 mandates the auth-scheme be compared case-insensitively, so a client
+// sending "Authorization: bearer <token>" (lowercase scheme — legal) must
+// authenticate. The old strings.TrimPrefix(h, "Bearer ") was case-sensitive and
+// rejected it with 401, breaking third-party producers that POST conforming
+// envelopes to /api/envelopes with a header-normalizing HTTP client.
+func TestServer_QueueAcceptsLowercaseBearerScheme(t *testing.T) {
+	ts, _ := newTestServer(t, "secret")
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/queue", nil)
+	req.Header.Set("Authorization", "bearer secret") // lowercase scheme — legal per RFC 7235
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Errorf("status=%d want 200 (lowercase bearer scheme must authenticate per RFC 7235)", res.StatusCode)
+	}
+}
+
 func TestServer_QueueListEmpty(t *testing.T) {
 	ts, _ := newTestServer(t, "")
 	res, err := http.Get(ts.URL + "/api/queue")

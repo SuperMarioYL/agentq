@@ -6,6 +6,40 @@ project loosely follows [SemVer](https://semver.org).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-07-23
+
+Correctness + licensing release. Two fixes that harden the wrapper's answer
+loop against a mid-session crash/race and the daemon's auth path against a
+case-sensitive scheme; the `ApprovalEnvelope` wire format is unchanged.
+
+### Fixed
+
+- **A timed-out prompt no longer leaks a decode goroutine that races the next
+  prompt's answer read.** `awaitAnswer` spawned a fresh `dec.Decode` goroutine
+  per prompt; on ctx/expiry/child-exit it returned without that goroutine
+  having exited, so the next `awaitAnswer` spawned a second goroutine on the
+  same `*json.Decoder` (and the same io.Reader) — concurrent use of the
+  decoder is a data race on its internal buffer/scan state, and a late answer
+  to the timed-out prompt was either silently discarded or hit the
+  EnvelopeID-mismatch error and crashed the wrapper mid-session. The wrapper
+  now owns ONE long-lived answer-reader goroutine for the whole `Process` loop
+  that decodes Answers and routes each to the currently-pending envelope via a
+  per-prompt channel; answers whose EnvelopeID does not match the pending
+  envelope are dropped as stale. `awaitAnswer` selects on that channel + the
+  expiry/ctx/child-exit timers — no per-call goroutine, no decoder sharing.
+- **The Authorization bearer scheme is now matched case-insensitively.**
+  `authMiddleware` extracted the token with `strings.TrimPrefix(h, "Bearer ")`,
+  which is case-sensitive; a conforming client sending `Authorization: bearer
+  <token>` (lowercase scheme, legal per RFC 7235) was left with `got = "bearer
+  <token>"` and rejected with 401. The scheme and token are now split, and the
+  scheme compared with `strings.EqualFold` before the constant-time token
+  compare, so any case of the Bearer scheme is accepted.
+
+### Changed
+
+- License switched from MIT to Apache 2.0 (LICENSE, the README badge, and the
+  contributing note are reconciled).
+
 ## [0.6.0] - 2026-07-14
 
 Correctness release. Two fixes that make dead cards leave the queue everywhere and
