@@ -644,3 +644,67 @@ func TestWrapperProcess_SecondPromptAfterTimeoutNoCrash(t *testing.T) {
 		t.Errorf("childIn=%q want %q (prompt1 default n + prompt2 real answer y)", got, want)
 	}
 }
+
+// delayingReader sleeps once before its first Read, modelling a child agent that
+// takes a moment to emit its first prompt. That gives the answer-reader goroutine
+// a head start to pre-decode a finite answer source before awaitAnswer registers
+// — the exact ordering that exposes the buffered-answer overwrite/drop bug.
+type delayingReader struct {
+	once  sync.Once
+	delay time.Duration
+	src   io.Reader
+}
+
+func (d *delayingReader) Read(p []byte) (int, error) {
+	d.once.Do(func() { time.Sleep(d.delay) })
+	return d.src.Read(p)
+}
+
+// TestWrapperProcess_PreLoadedMultiAnswerReplayedInOrder guards
+// fix-answerreader-overwrites-buffered-answer: when a finite answer source is
+// pre-loaded with multiple answers BEFORE the first prompt matches (the
+// documented `--answer-in < file` / "driven with shell redirection" mode at
+// README.en.md:109), the reader decodes ans1 then ans2 before awaitAnswer1
+// registers. The pre-fix code parked at most ONE buffered answer
+// (`w.bufferedAns = &a` OVERWRITES the prior) and DROPPED a decoded answer
+// whose EnvelopeID didn't match the live waiter (no else branch) — so ans1 was
+// lost to overwrite, ans2 was dropped, and the wrapper crashed with
+// "read answer for ID-1: EOF" instead of replaying the recorded approvals. The
+// fix queues both and replays them in order.
+func TestWrapperProcess_PreLoadedMultiAnswerReplayedInOrder(t *testing.T) {
+	// Delay the child's first read so the answer reader pre-decodes BOTH
+	// answers (and hits EOF) before the first prompt matches — the race window
+	// the buggy single-slot buffer exposes.
+	childOut := &delayingReader{
+		delay: 100 * time.Millisecond,
+		src:   strings.NewReader("Prompt one? [y/N]\nPrompt two? [y/N]\n"),
+	}
+	answers := strings.NewReader(
+		`{"envelope_id":"ID-1","choice_key":"y","answered_at":"2026-06-04T10:00:00Z"}` + "\n" +
+			`{"envelope_id":"ID-2","choice_key":"n","answered_at":"2026-06-04T10:00:01Z"}` + "\n",
+	)
+
+	var childIn bytes.Buffer
+	var idCount int
+	mkID := func() string {
+		idCount++
+		return fmt.Sprintf("ID-%d", idCount)
+	}
+
+	w := &Wrapper{
+		Cmd:         []string{"x"},
+		AgentID:     "x-1", // set explicitly so applyDefaults does not consume a NewID call (which would shift prompt IDs off the pre-loaded envelope_ids)
+		EnvelopeOut: io.Discard,
+		AnswerIn:    answers,
+		Stdout:      io.Discard,
+		Now:         time.Now, // real clock; default 10-min expiry keeps prompts live
+		NewID:       mkID,
+	}
+
+	if err := w.Process(context.Background(), childOut, &childIn); err != nil {
+		t.Fatalf("Process: %v (bug: pre-loaded answers lost to overwrite/drop)", err)
+	}
+	if got, want := childIn.String(), "y\nn\n"; got != want {
+		t.Errorf("childIn=%q want %q (pre-loaded answers not replayed in order)", got, want)
+	}
+}

@@ -2,11 +2,14 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"sync"
 	"time"
 
@@ -79,10 +82,30 @@ func (f *daemonForwarder) Write(p []byte) (int, error) {
 // Answer JSON into the pipe the wrapper reads. On timeout/expiry (HTTP 504) it
 // synthesizes the default-choice Answer so the wrapper unblocks with the agent's
 // own fallback instead of hanging — the same contract the wrapper honors locally.
+//
+// Non-504 failures (401/403 auth failure — e.g. reusing `agentq serve` without
+// --daemon-token —, connection-refused, 5xx, or a hung-daemon client timeout) are
+// surfaced to stderr and the answer pipe is closed with the error so Run exits
+// non-zero: approvals must never be silently bypassed by auto-defaulting every
+// prompt. (fix-forwarder-swallows-daemon-post-errors)
 func (f *daemonForwarder) forwardOne(env protocol.ApprovalEnvelope) {
 	ans, err := f.postEnvelope(env)
 	if err != nil {
-		ans = defaultAnswer(env)
+		var psErr *postStatusError
+		if errors.As(err, &psErr) && psErr.status == http.StatusGatewayTimeout {
+			// 504 = no answer within the envelope TTL: synthesize the default
+			// choice so the wrapped agent still unblocks, mirroring the local
+			// wrapper's own give-up-and-abort contract.
+			ans = defaultAnswer(env)
+		} else {
+			// Auth failure, transport error, 5xx, or a hung-daemon timeout:
+			// surface it so approvals are not silently auto-defaulted, then stop
+			// forwarding — the wrapper's answer read sees the closed pipe and Run
+			// exits non-zero instead of replaying the default for every prompt.
+			fmt.Fprintf(os.Stderr, "wrap --daemon: %v\n", err)
+			_ = f.pw.CloseWithError(err)
+			return
+		}
 	}
 	data, mErr := json.Marshal(ans)
 	if mErr != nil {
@@ -92,9 +115,25 @@ func (f *daemonForwarder) forwardOne(env protocol.ApprovalEnvelope) {
 	_, _ = f.pw.Write(data)
 }
 
+// postStatusError carries the HTTP status of a failed envelope POST so forwardOne
+// can distinguish the no-answer 504 (fall back to the default choice) from
+// auth/transport failures (401, connection-refused, 5xx) that must be surfaced
+// instead of silently auto-defaulting every prompt.
+type postStatusError struct {
+	status int
+	body   string
+}
+
+func (e *postStatusError) Error() string {
+	return fmt.Sprintf("wrap --daemon: envelope POST status %d: %s", e.status, e.body)
+}
+
 // postEnvelope submits one envelope to POST /api/envelopes and returns the
-// daemon's Answer. A 504 (no answer within TTL) is surfaced as an error so the
-// caller falls back to the default choice.
+// daemon's Answer. A 504 (no answer within TTL) is surfaced as a postStatusError
+// so the caller can classify it (fall back to the default choice). Any other
+// non-200 status (401/403/5xx) is surfaced as a postStatusError too; a transport
+// error (connection-refused, hung-daemon timeout) is surfaced as the raw error —
+// forwardOne surfaces all of these instead of swallowing them.
 func (f *daemonForwarder) postEnvelope(env protocol.ApprovalEnvelope) (protocol.Answer, error) {
 	body, err := json.Marshal(env)
 	if err != nil {
@@ -104,9 +143,18 @@ func (f *daemonForwarder) postEnvelope(env protocol.ApprovalEnvelope) (protocol.
 	if f.token != "" {
 		u += "?t=" + url.QueryEscape(f.token)
 	}
-	// No client-side timeout: the daemon enforces the envelope TTL and returns
-	// 504, so a long-lived prompt just blocks here as intended.
-	req, err := http.NewRequest(http.MethodPost, u, bytes.NewReader(body))
+	// Per-request timeout slightly beyond the envelope's own TTL: the daemon is
+	// supposed to return 504 at expiry, so this only fires when the daemon is
+	// HUNG (TCP alive but unresponsive) — surfacing the stall instead of
+	// blocking forwardOne forever and leaking a goroutine per prompt.
+	// (fix-forwarder-swallows-daemon-post-errors)
+	deadline := env.ExpiresAt
+	if deadline.IsZero() {
+		deadline = time.Now().Add(protocol.DefaultExpiry)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Until(deadline)+2*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(body))
 	if err != nil {
 		return protocol.Answer{}, err
 	}
@@ -118,7 +166,7 @@ func (f *daemonForwarder) postEnvelope(env protocol.ApprovalEnvelope) (protocol.
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return protocol.Answer{}, fmt.Errorf("wrap --daemon: envelope POST status %d: %s", resp.StatusCode, bytes.TrimSpace(raw))
+		return protocol.Answer{}, &postStatusError{status: resp.StatusCode, body: string(bytes.TrimSpace(raw))}
 	}
 	var ans protocol.Answer
 	if err := json.Unmarshal(raw, &ans); err != nil {

@@ -86,19 +86,21 @@ type Wrapper struct {
 	// Answer here by EnvelopeID, so the decoder's internal buffer/scan state is
 	// never used concurrently (the data race the old per-call goroutine caused).
 	//
-	// bufferedAns / bufferedErr hold a decoded Answer (or a terminal decode
-	// error such as EOF) that arrived while NO awaitAnswer was pending — e.g. an
-	// answer pre-loaded into a finite reader before the first prompt matched,
+	// bufferedQueue / bufferedErr hold decoded Answers (or a terminal decode
+	// error such as EOF) that arrived while NO awaitAnswer was pending — e.g.
+	// answers pre-loaded into a finite reader before the first prompt matched,
 	// or a late reply to a prompt that already timed out between awaitAnswer
-	// calls. The next awaitAnswer consumes them: a matching Answer is used
-	// directly, a non-matching Answer is dropped as stale, and a buffered
-	// terminal error is surfaced immediately so a drained source does not make
-	// the wrapper wait out the full envelope expiry.
+	// calls. The next awaitAnswer consumes a matching one by EnvelopeID; a
+	// non-matching answer STAYS queued for the next waiter (instead of being
+	// dropped), so a pre-loaded multi-answer source is replayed in order, and a
+	// buffered terminal error is surfaced immediately only when no queued
+	// answer matches, so a drained source does not make the wrapper wait out
+	// the full envelope expiry. (fix-answerreader-overwrites-buffered-answer)
 	pendingMu    sync.Mutex
 	pendingID    string
 	pendingCh    chan decodedAnswer
-	bufferedAns  *protocol.Answer
-	bufferedErr  error
+	bufferedQueue []protocol.Answer
+	bufferedErr   error
 
 	sessionStarted time.Time
 	contextBuf     []string
@@ -307,17 +309,19 @@ func (w *Wrapper) awaitAnswer(ctx context.Context, env *protocol.ApprovalEnvelop
 	w.pendingMu.Lock()
 	// If the reader already decoded something before we registered (an answer
 	// pre-loaded into a finite reader, or a late reply that landed between
-	// awaitAnswer calls), consume it now: a matching Answer short-circuits, a
-	// non-matching Answer is dropped as stale, and a buffered terminal error
-	// (EOF) is surfaced immediately instead of waiting out the full expiry.
+	// awaitAnswer calls), consume it now: a matching Answer short-circuits,
+	// non-matching queued Answers stay for the next waiter, and a buffered
+	// terminal error (EOF) is surfaced immediately instead of waiting out the
+	// full expiry.
 	var pre decodedAnswer
 	havePre := false
-	if w.bufferedAns != nil {
-		if w.bufferedAns.EnvelopeID == env.ID {
-			pre = decodedAnswer{ans: *w.bufferedAns}
+	for i := 0; i < len(w.bufferedQueue); i++ {
+		if w.bufferedQueue[i].EnvelopeID == env.ID {
+			pre = decodedAnswer{ans: w.bufferedQueue[i]}
 			havePre = true
+			w.bufferedQueue = append(w.bufferedQueue[:i], w.bufferedQueue[i+1:]...)
+			break
 		}
-		w.bufferedAns = nil
 	}
 	if !havePre && w.bufferedErr != nil {
 		pre = decodedAnswer{err: w.bufferedErr}
@@ -388,18 +392,17 @@ func (w *Wrapper) resolveAnswer(env *protocol.ApprovalEnvelope, res decodedAnswe
 // used concurrently (the data race the old per-call goroutine caused when a
 // prompt timed out and the next prompt spawned a second decoder on the same
 // *json.Decoder). Each decoded Answer is routed to the currently-pending
-// awaitAnswer via w.pendingCh; an answer whose EnvelopeID does not match the
-// pending envelope (a late reply to a prompt that already timed out) is DROPPED
-// as stale so it can neither race the next prompt's decode nor trip the
-// EnvelopeID-mismatch crash. An answer (or terminal decode error) that lands
-// while NO waiter is pending is buffered for the next awaitAnswer, so a
-// finite/pre-loaded answer source still works and a drained source surfaces
-// immediately instead of making the wrapper wait out the full expiry.
+// awaitAnswer via w.pendingCh when its EnvelopeID matches; an answer whose
+// EnvelopeID does not match the pending envelope (a late reply to a prompt that
+// already timed out, or a pre-loaded answer for a later prompt) is ENQUEUED for
+// the next awaitAnswer instead of dropped, so a pre-loaded multi-answer source
+// is replayed in order. A terminal decode error (EOF when the source is
+// closed, or a malformed-JSON error) is forwarded to a live waiter if one
+// exists, otherwise buffered (or dropped if already buffered) and the reader
+// stops.
 //
-// The goroutine exits when Decode returns an error (EOF when the answer source
-// is closed, or a malformed-JSON error): the error is forwarded to a live
-// waiter if one exists, otherwise buffered (or dropped if already buffered) and
-// the reader stops.
+// The goroutine exits when Decode returns an error: the error is forwarded to a
+// live waiter if one exists, otherwise buffered for the next awaitAnswer.
 func (w *Wrapper) runAnswerReader(dec *json.Decoder) {
 	for {
 		var a protocol.Answer
@@ -410,8 +413,8 @@ func (w *Wrapper) runAnswerReader(dec *json.Decoder) {
 		if err != nil {
 			// Source exhausted or malformed: forward to a live waiter so it can
 			// surface the error; if no one is waiting, park it for the next
-			// awaitAnswer (overwriting nothing — a buffered Answer already
-			// consumed by then takes precedence via awaitAnswer's check order).
+			// awaitAnswer (overwriting nothing — queued Answers already
+			// consumed by then take precedence via awaitAnswer's check order).
 			if ch != nil {
 				select {
 				case ch <- decodedAnswer{ans: a, err: err}:
@@ -423,24 +426,40 @@ func (w *Wrapper) runAnswerReader(dec *json.Decoder) {
 			w.pendingMu.Unlock()
 			return
 		}
-		if ch != nil {
-			// A waiter is live: route only if the EnvelopeID matches. A stale
-			// answer (wrong ID) is dropped here and the loop decodes the next —
-			// it is never buffered, because the live waiter will only ever
-			// accept the answer it is pending on.
-			if a.EnvelopeID == id {
-				select {
-				case ch <- decodedAnswer{ans: a, err: nil}:
-				default:
-				}
+		if ch != nil && a.EnvelopeID == id {
+			// A waiter is live AND this answer matches it: route directly. A
+			// stale answer (wrong ID) is NOT dropped — it is enqueued for the
+			// next awaitAnswer (fix-answerreader-overwrites-buffered-answer),
+			// so a pre-loaded multi-answer stream is replayed in prompt order
+			// instead of losing ans1 to overwrite then crashing on EOF.
+			select {
+			case ch <- decodedAnswer{ans: a, err: nil}:
+			default:
 			}
 		} else {
-			// No waiter yet (answer pre-loaded, or landed between awaitAnswer
-			// calls): park it for the next awaitAnswer to consume by ID.
-			w.bufferedAns = &a
+			// No waiter yet, or a waiter pending on a different ID: enqueue for
+			// the next awaitAnswer to consume by ID (instead of overwriting a
+			// single buffered slot and dropping future answers).
+			w.enqueueBuffered(a)
 		}
 		w.pendingMu.Unlock()
 	}
+}
+
+// maxBufferedAnswers caps the FIFO of pre-decoded answers so a runaway answer
+// source can't grow the buffer without bound; when full the oldest answer is
+// dropped as genuinely stale. 256 is far above any realistic pre-loaded prompt
+// count while keeping the slice tiny.
+const maxBufferedAnswers = 256
+
+// enqueueBuffered parks a decoded Answer in the FIFO for the next awaitAnswer
+// to consume by EnvelopeID, dropping the oldest (as stale) when the queue is
+// full so the buffer stays bounded.
+func (w *Wrapper) enqueueBuffered(a protocol.Answer) {
+	if len(w.bufferedQueue) >= maxBufferedAnswers {
+		w.bufferedQueue = w.bufferedQueue[1:]
+	}
+	w.bufferedQueue = append(w.bufferedQueue, a)
 }
 
 // clearPending relinquishes the currently-pending slot iff it still points at ch,

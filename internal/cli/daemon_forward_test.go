@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -113,5 +114,132 @@ func TestDaemonForwarder_TimeoutFallsBackToDefault(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("no fallback answer on 504")
+	}
+}
+
+// TestDaemonForwarder_AuthFailureSurfacedNotSwallowed guards
+// fix-forwarder-swallows-daemon-post-errors: when the daemon returns 401 (the
+// real failure when `agentq wrap --daemon` reuses a separately-started
+// `agentq serve` without --daemon-token, so the POST carries no ?t= and
+// authMiddleware rejects it), the forwarder must surface the error and close
+// the answer pipe instead of silently synthesizing the default choice for every
+// prompt — which would bypass approvals with zero signal. The pre-fix code
+// turned EVERY postEnvelope error into defaultAnswer(env), so this test would
+// see a clean default answer and never fail.
+func TestDaemonForwarder_AuthFailureSurfacedNotSwallowed(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized) // 401
+	}))
+	defer srv.Close()
+
+	fwd := newDaemonForwarder(srv.URL, "")
+	defer fwd.Close()
+
+	// Far-future expiry so the per-request client timeout never fires here;
+	// the 401 response is what this test exercises.
+	env := protocol.ApprovalEnvelope{
+		ID: "01AUTH", AgentID: "a", Prompt: "p",
+		Choices:   []protocol.Choice{{Key: "y", IsDefault: true}, {Key: "n"}},
+		ExpiresAt: time.Now().Add(time.Hour),
+	}
+	line, _ := json.Marshal(env)
+	line = append(line, '\n')
+	if _, err := fwd.Write(line); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	// Without the fix, the 401 is swallowed and a default answer ("y") lands on
+	// the pipe; with the fix, the pipe is closed with the 404/401 error and the
+	// decoder surfaces it.
+	var ans protocol.Answer
+	decErr := json.NewDecoder(bufio.NewReader(fwd)).Decode(&ans)
+	if decErr == nil {
+		t.Fatalf("expected the 401 to be surfaced as a read error, but got a silent default answer %+v (approvals bypassed with zero signal)", ans)
+	}
+	if !strings.Contains(decErr.Error(), "401") {
+		t.Errorf("read error=%q want substring 401", decErr.Error())
+	}
+}
+
+// TestDaemonForwarder_ConnectionRefusedSurfaced guards the transport-error path
+// of fix-forwarder-swallows-daemon-post-errors: when the daemon is down (the TCP
+// connect fails — e.g. the separately-started `agentq serve` crashed
+// mid-session or the network dropped), the forwarder must surface the
+// connection error instead of silently auto-defaulting every prompt.
+func TestDaemonForwarder_ConnectionRefusedSurfaced(t *testing.T) {
+	// A server we immediately tear down so its old address refuses connections.
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	baseURL := srv.URL
+	srv.Close()
+
+	fwd := newDaemonForwarder(baseURL, "")
+	defer fwd.Close()
+
+	env := protocol.ApprovalEnvelope{
+		ID: "01REFUSED", AgentID: "a", Prompt: "p",
+		Choices:   []protocol.Choice{{Key: "y", IsDefault: true}, {Key: "n"}},
+		ExpiresAt: time.Now().Add(time.Hour),
+	}
+	line, _ := json.Marshal(env)
+	line = append(line, '\n')
+	if _, err := fwd.Write(line); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	decErr := json.NewDecoder(bufio.NewReader(fwd)).Decode(&protocol.Answer{})
+	if decErr == nil {
+		t.Fatal("expected connection-refused to be surfaced as a read error, got a silent default answer (approvals bypassed)")
+	}
+}
+
+// TestDaemonForwarder_HungDaemonTimesOutAndSurfaced guards the client-timeout
+// half of fix-forwarder-swallows-daemon-post-errors: when the daemon's TCP is
+// alive but it never responds (a HUNG daemon), the per-request timeout (set
+// slightly beyond env.ExpiresAt) must fire so forwardOne surfaces the stall
+// instead of blocking forever — the pre-fix http.Client had no timeout, so a
+// hung daemon stalled the wrapper for 10 min/prompt (its own envelope expiry)
+// and leaked a goroutine per prompt.
+func TestDaemonForwarder_HungDaemonTimesOutAndSurfaced(t *testing.T) {
+	// Model a hung daemon: the server accepts the request but never responds
+	// until the test releases the gate on cleanup.
+	hungCh := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-hungCh
+	}))
+	defer srv.Close()
+	defer close(hungCh)
+
+	fwd := newDaemonForwarder(srv.URL, "")
+	defer fwd.Close()
+
+	// Short expiry so the per-request timeout (expires_at + 2s) fires within a
+	// couple of seconds instead of the 10-minute envelope TTL.
+	env := protocol.ApprovalEnvelope{
+		ID: "01HUNG", AgentID: "a", Prompt: "p",
+		Choices:   []protocol.Choice{{Key: "y", IsDefault: true}, {Key: "n"}},
+		ExpiresAt: time.Now().Add(100 * time.Millisecond),
+	}
+	line, _ := json.Marshal(env)
+	line = append(line, '\n')
+	if _, err := fwd.Write(line); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	decErrCh := make(chan error, 1)
+	go func() {
+		// ReadString returns the error when the pipe is closed with it; it
+		// returns nil only if a full answer line was written (the silent
+		// default-answer path the fix must eliminate).
+		_, err := bufio.NewReader(fwd).ReadString('\n')
+		decErrCh <- err
+	}()
+
+	select {
+	case err := <-decErrCh:
+		if err == nil {
+			t.Fatal("expected the hung-daemon client timeout to be surfaced, got a clean answer (approvals bypassed)")
+		}
+	case <-time.After(8 * time.Second):
+		t.Fatal("forwarder stalled on hung daemon — no per-request client timeout (bug: leaks goroutine, stalls 10 min/prompt)")
 	}
 }
