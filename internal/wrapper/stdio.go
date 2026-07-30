@@ -398,11 +398,13 @@ func (w *Wrapper) resolveAnswer(env *protocol.ApprovalEnvelope, res decodedAnswe
 // the next awaitAnswer instead of dropped, so a pre-loaded multi-answer source
 // is replayed in order. A terminal decode error (EOF when the source is
 // closed, or a malformed-JSON error) is forwarded to a live waiter if one
-// exists, otherwise buffered (or dropped if already buffered) and the reader
-// stops.
+// exists; if the live waiter's cap-1 channel is already full (a matching
+// Answer was just sent but not yet consumed) the error is parked in
+// w.bufferedErr for the next awaitAnswer instead of dropped, and if no
+// waiter is live it is buffered. The reader stops after a terminal error.
 //
-// The goroutine exits when Decode returns an error: the error is forwarded to a
-// live waiter if one exists, otherwise buffered for the next awaitAnswer.
+// The goroutine exits when Decode returns an error: the error is forwarded to
+// a live waiter if one exists, otherwise buffered for the next awaitAnswer.
 func (w *Wrapper) runAnswerReader(dec *json.Decoder) {
 	for {
 		var a protocol.Answer
@@ -419,6 +421,16 @@ func (w *Wrapper) runAnswerReader(dec *json.Decoder) {
 				select {
 				case ch <- decodedAnswer{ans: a, err: err}:
 				default:
+					// The live waiter's cap-1 channel is already full (a matching
+					// Answer was just sent but not yet consumed), so the terminal
+					// error can't be delivered here. Park it for the next
+					// awaitAnswer instead of dropping it — otherwise a drained
+					// finite source (EOF) or a closed daemon answer pipe makes
+					// every subsequent prompt wait out the full envelope expiry
+					// instead of surfacing the error at once. awaitAnswer's
+					// pre-check consumes bufferedErr when no queued Answer matches.
+					// (fix-answerreader-drops-terminal-error-when-waiter-ch-full)
+					w.bufferedErr = err
 				}
 			} else {
 				w.bufferedErr = err

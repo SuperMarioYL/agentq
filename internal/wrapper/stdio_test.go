@@ -708,3 +708,102 @@ func TestWrapperProcess_PreLoadedMultiAnswerReplayedInOrder(t *testing.T) {
 		t.Errorf("childIn=%q want %q (pre-loaded answers not replayed in order)", got, want)
 	}
 }
+
+// TestRunAnswerReader_ParksTerminalErrorWhenWaiterChFull guards
+// fix-answerreader-drops-terminal-error-when-waiter-ch-full: when the
+// long-lived answer reader decodes a terminal error (EOF) while a live
+// waiter's cap-1 channel is already full — a matching Answer was just sent
+// but not yet consumed (a real scheduling race: the reader runs twice
+// back-to-back on a separate goroutine, decoding the last answer then EOF
+// before the waiter's select consumes the answer) — the error must be parked
+// in w.bufferedErr so the NEXT awaitAnswer surfaces it via the pre-check
+// instead of being dropped by the default branch. Pre-fix, the dropped
+// error left w.bufferedErr == nil, so the current waiter still consumed the
+// valid Answer fine but every SUBSEQUENT awaitAnswer found no reader
+// goroutine and no bufferedErr and waited out the full envelope expiry
+// (DefaultExpiry 10 min) before abortKey fired.
+//
+// The race is reproduced DETERMINISTICALLY by pre-filling the live waiter's
+// cap-1 channel with a matching Answer (the exact state the reader leaves it
+// in one decode before EOF) and then running the reader over an exhausted
+// (EOF) source: the default branch fires on the very next decode. The fix
+// parks the error; without it the error is dropped and the second
+// awaitAnswer hangs to its envelope expiry.
+func TestRunAnswerReader_ParksTerminalErrorWhenWaiterChFull(t *testing.T) {
+	w := &Wrapper{
+		Cmd:   []string{"x"},
+		Now:   time.Now, // real clock so a dropped error makes awaitAnswer hang to expiry, not return instantly
+		NewID: func() string { return "ID" },
+	}
+	w.applyDefaults()
+
+	// Register a live waiter for envelope ID-1, then pre-fill its cap-1
+	// channel with the matching Answer — the exact state the reader leaves
+	// behind one decode before it hits EOF: ch != nil AND ch is full.
+	ch := make(chan decodedAnswer, 1)
+	w.pendingMu.Lock()
+	w.pendingID = "ID-1"
+	w.pendingCh = ch
+	w.pendingMu.Unlock()
+	ch <- decodedAnswer{ans: protocol.Answer{EnvelopeID: "ID-1", ChoiceKey: "y"}}
+
+	// Exhausted answer source: the very next Decode returns io.EOF.
+	dec := json.NewDecoder(strings.NewReader(""))
+
+	// Run the reader to completion (it exits on any decode error). It
+	// decodes EOF, finds the live waiter (ch != nil), and must take the
+	// default branch because ch is already full — park the error instead of
+	// dropping it.
+	w.runAnswerReader(dec)
+
+	// The terminal error must be parked for the next awaitAnswer.
+	w.pendingMu.Lock()
+	bufferedErr := w.bufferedErr
+	w.pendingMu.Unlock()
+	if bufferedErr == nil {
+		t.Fatalf("terminal EOF error was dropped by the default branch; " +
+			"w.bufferedErr == nil (bug: next awaitAnswer waits out the full " +
+			"envelope expiry instead of surfacing the error)")
+	}
+
+	// The live waiter's channel must still hold the matching Answer, not be
+	// clobbered by the error (the success path is unchanged).
+	select {
+	case got := <-ch:
+		if got.err != nil || got.ans.EnvelopeID != "ID-1" {
+			t.Errorf("waiter channel clobbered: got=%+v want matching Answer ID-1", got)
+		}
+	default:
+		t.Errorf("waiter channel should still hold the matching Answer")
+	}
+
+	// The first waiter consumes its Answer and relinquishes the slot.
+	w.clearPending(ch)
+
+	// The NEXT prompt's awaitAnswer must surface the parked terminal error
+	// immediately via the pre-check — NOT wait out the envelope expiry. The
+	// 10-minute expiry + real clock means a regression (dropped error) makes
+	// awaitAnswer hang until the test timeout instead of returning quickly.
+	env2 := &protocol.ApprovalEnvelope{
+		ID:        "ID-2",
+		Choices:   []protocol.Choice{{Key: "y", Label: "Approve"}, {Key: "n", Label: "Deny", IsDefault: true}},
+		ExpiresAt: w.Now().Add(w.Expiry),
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := w.awaitAnswer(context.Background(), env2)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatalf("awaitAnswer returned nil; want the parked EOF error surfaced to ID-2")
+		}
+		if !strings.Contains(err.Error(), "read answer for ID-2") {
+			t.Errorf("err=%q want substring %q", err, "read answer for ID-2")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("awaitAnswer did not surface the parked terminal error within 2s " +
+			"(bug: error was dropped, so the next prompt waits out the full envelope expiry)")
+	}
+}
