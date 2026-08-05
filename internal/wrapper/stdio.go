@@ -20,6 +20,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/SuperMarioYL/agentq/internal/protocol"
 )
@@ -96,9 +97,9 @@ type Wrapper struct {
 	// buffered terminal error is surfaced immediately only when no queued
 	// answer matches, so a drained source does not make the wrapper wait out
 	// the full envelope expiry. (fix-answerreader-overwrites-buffered-answer)
-	pendingMu    sync.Mutex
-	pendingID    string
-	pendingCh    chan decodedAnswer
+	pendingMu     sync.Mutex
+	pendingID     string
+	pendingCh     chan decodedAnswer
 	bufferedQueue []protocol.Answer
 	bufferedErr   error
 
@@ -545,7 +546,21 @@ func (w *Wrapper) contextSnapshot() string {
 	defer w.mu.Unlock()
 	s := strings.Join(w.contextBuf, "\n")
 	if len(s) > protocol.MaxContextBytes {
-		s = s[len(s)-protocol.MaxContextBytes:]
+		// Keep the tail within MaxContextBytes, but slice on a RUNE boundary.
+		// `s[len(s)-MaxContextBytes:]` lands on a byte offset that may fall
+		// mid-multibyte (the common case for the zh-CN content this product
+		// targets — 3-byte CJK chars, and a join of 20 CJK lines routinely
+		// exceeds 4 KiB), producing invalid UTF-8 whose leading byte Go's
+		// encoding/json then replaces with U+FFFD on the phone triage surface.
+		// Walking start forward to the next utf8.RuneStart keeps the slice
+		// valid UTF-8 (the join of valid lines is valid, so any rune-start
+		// offset yields a valid string) and only shortens it.
+		// (fix-contextsnapshot-truncation-splits-multibyte-utf8)
+		start := len(s) - protocol.MaxContextBytes
+		for start < len(s) && !utf8.RuneStart(s[start]) {
+			start++
+		}
+		s = s[start:]
 	}
 	return s
 }

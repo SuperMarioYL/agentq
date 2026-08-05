@@ -10,6 +10,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/SuperMarioYL/agentq/internal/protocol"
 )
@@ -805,5 +806,79 @@ func TestRunAnswerReader_ParksTerminalErrorWhenWaiterChFull(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatalf("awaitAnswer did not surface the parked terminal error within 2s " +
 			"(bug: error was dropped, so the next prompt waits out the full envelope expiry)")
+	}
+}
+
+// TestContextSnapshot_TruncatesOnRuneBoundary is the v0.10 regression for
+// fix-contextsnapshot-truncation-splits-multibyte-utf8: the tail slice must land on a
+// rune boundary so a zh-CN (multibyte) context does not begin with U+FFFD on the phone.
+func TestContextSnapshot_TruncatesOnRuneBoundary(t *testing.T) {
+	// Long CJK lines so the join of a handful exceeds MaxContextBytes (4096),
+	// forcing the tail-slice path. With 3-byte CJK chars, the byte at
+	// len(join)-MaxContextBytes is a continuation byte for most offsets, so the
+	// pre-fix `s[len(s)-MaxContextBytes:]` slice began mid-character and produced
+	// invalid UTF-8 (Go's json then replaced the split byte with U+FFFD).
+	longLine := strings.Repeat("请确认是否执行此命令", 20) // 20 * 30 = 600 bytes/line
+	var lines []string
+	for len(strings.Join(lines, "\n")) <= protocol.MaxContextBytes {
+		lines = append(lines, longLine)
+	}
+	w := &Wrapper{ContextLines: len(lines), Now: time.Now}
+	w.contextBuf = lines // set directly so pushContext's 20-line cap can't hide the case
+	snap := w.contextSnapshot()
+	if len(snap) == 0 {
+		t.Fatalf("snapshot empty; expected a truncated tail (join=%d)", len(strings.Join(lines, "\n")))
+	}
+	if len(snap) > protocol.MaxContextBytes {
+		t.Fatalf("snapshot len=%d exceeds MaxContextBytes=%d", len(snap), protocol.MaxContextBytes)
+	}
+	if !utf8.ValidString(snap) {
+		t.Fatalf("snapshot is not valid UTF-8 — the byte-slice truncation split a multibyte sequence (first byte=0x%02x)", snap[0])
+	}
+	if r, _ := utf8.DecodeRuneInString(snap); r == '\uFFFD' {
+		t.Fatalf("snapshot begins with U+FFFD replacement char; rune-boundary slice regressed")
+	}
+}
+
+// TestWrapperProcess_EmitsValidUTF8ContextForCJK is the end-to-end version: a wrapped
+// agent whose stdout is long CJK lines must produce an ApprovalEnvelope.Context that is
+// valid UTF-8 with no leading replacement char, even when truncated past MaxContextBytes.
+func TestWrapperProcess_EmitsValidUTF8ContextForCJK(t *testing.T) {
+	// Long CJK lines (600 B each). pushContext caps at ContextLines (20), and
+	// 20 * 600 = ~12 KiB > MaxContextBytes, so the snapshot tail-slice fires.
+	longLine := strings.Repeat("请确认是否执行此命令", 20)
+	var lines []string
+	for i := 0; i < 30; i++ { // fill the 20-line rolling buffer and then some
+		lines = append(lines, longLine)
+	}
+	in := strings.Join(lines, "\n") + "\nGo? [y/N]\n"
+	answers := strings.NewReader(`{"envelope_id":"ID","choice_key":"n"}` + "\n")
+	var envOut bytes.Buffer
+	w := &Wrapper{
+		Cmd:         []string{"x"},
+		EnvelopeOut: &envOut,
+		AnswerIn:    answers,
+		Stdout:      io.Discard,
+		NewID:       func() string { return "ID" },
+		Now:         func() time.Time { return time.Unix(0, 0) },
+	}
+	if err := w.Process(context.Background(), strings.NewReader(in), io.Discard); err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	var env protocol.ApprovalEnvelope
+	if err := json.Unmarshal(envOut.Bytes(), &env); err != nil {
+		t.Fatalf("decode envelope: %v", err)
+	}
+	if len(env.Context) > protocol.MaxContextBytes {
+		t.Errorf("context len=%d exceeds MaxContextBytes=%d", len(env.Context), protocol.MaxContextBytes)
+	}
+	if len(env.Context) < protocol.MaxContextBytes {
+		t.Errorf("context len=%d did not reach MaxContextBytes=%d — truncation path not exercised", len(env.Context), protocol.MaxContextBytes)
+	}
+	if !utf8.ValidString(env.Context) {
+		t.Errorf("envelope context is not valid UTF-8 (a split multibyte seq would do this pre-fix)")
+	}
+	if r, _ := utf8.DecodeRuneInString(env.Context); r == '\uFFFD' {
+		t.Errorf("envelope context begins with U+FFFD; the byte-slice truncation regressed")
 	}
 }
