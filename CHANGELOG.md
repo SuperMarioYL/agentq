@@ -6,6 +6,28 @@ project loosely follows [SemVer](https://semver.org).
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-08-11
+
+Quiet correctness release. One fix on the phone triage surface; the wire format
+and HTTP API are unchanged.
+
+### Fixed
+
+- **A reconnecting phone no longer lingers stale cards.** When the WebSocket
+  dropped (screen off, background tab, LAN blip — routine on the primary phone
+  surface), `connect()` re-opened the socket but never re-fetched
+  `GET /api/queue`. The daemon's WS bootstrap snapshot only pushes LIVE
+  envelopes; it does not replay answer/removal events for cards answered,
+  expired, or evicted during the disconnect (the prior subscriber was
+  cancelled, so those broadcasts never arrived). The phone's local `cards` Map
+  was never reconciled, so a card answered by another phone or timed out during
+  the drop stayed on screen, and tapping it later failed with 404/409.
+  `ws.onopen` now re-runs the bootstrap snapshot diff (re-fetch
+  `GET /api/queue`, remove local cards no longer live, silently render any
+  missing live ones) — the resync `internal/daemon/queue.go`'s `Subscribe`
+  comment already promises. No server-side change; `PutAnswerIfAbsent` already
+  protects the audit record.
+
 ## [0.7.0] - 2026-07-23
 
 Correctness + licensing release. Two fixes that harden the wrapper's answer

@@ -114,6 +114,35 @@
     }
   }
 
+  // syncQueueSnapshot reconciles the local cards Map against the daemon's
+  // live queue (GET /api/queue). Cards that were answered, expired, or
+  // evicted while this phone was disconnected — or dropped from a full
+  // slow-subscriber channel — are removed; live cards missing locally are
+  // rendered silently (renderEnvelope dedupes). The WS bootstrap burst only
+  // pushes LIVE envelopes, so it can add but never tell us what to REMOVE;
+  // without this reconcile stale cards linger after a drop and tapping them
+  // later fails with 404/409. Runs at startup (bootstrap) and on every
+  // ws.onopen so each reconnect reconciles the phone to the daemon's actual
+  // live state — the resync internal/daemon/queue.go's Subscribe comment
+  // already promises.
+  async function syncQueueSnapshot() {
+    let list;
+    try {
+      const res = await fetch(`${apiBase}/queue?t=${encodeURIComponent(token)}`);
+      if (!res.ok) return;
+      list = await res.json();
+    } catch (_) {
+      return; /* leave local state untouched; the WS burst will fill in */
+    }
+    const live = new Set((list || []).map((env) => env.id));
+    // Drop local cards no longer live on the daemon.
+    for (const id of [...cards.keys()]) {
+      if (!live.has(id)) removeCard(id);
+    }
+    // Render any live card we don't already show (silent — backlog).
+    (list || []).forEach((env) => renderEnvelope(env, { silent: true }));
+  }
+
   async function bootstrap() {
     if ('Notification' in window && Notification.permission === 'default') {
       try {
@@ -122,17 +151,7 @@
         /* ignore */
       }
     }
-    try {
-      const res = await fetch(`${apiBase}/queue?t=${encodeURIComponent(token)}`);
-      if (res.ok) {
-        const list = await res.json();
-        // Backlog cards render SILENTLY: (re)opening the tab with N pending
-        // cards must not fire N browser notifications at once.
-        list.forEach((env) => renderEnvelope(env, { silent: true }));
-      }
-    } catch (_) {
-      /* ws will fill in */
-    }
+    await syncQueueSnapshot();
     if (cards.size === 0) renderEmpty();
     connect();
   }
@@ -157,6 +176,13 @@
     };
     ws.onopen = () => {
       setStatus('live', 'ok');
+      // Reconcile against the daemon's live queue: a WS drop cancels the
+      // prior subscriber, so answer/expiry/eviction events broadcast during
+      // the disconnect never reached this phone, and the bootstrap burst
+      // below only pushes LIVE envelopes — it cannot tell us what to REMOVE.
+      // Re-fetch /api/queue and drop local cards no longer live; live cards
+      // missing locally render silently (renderEnvelope dedupes).
+      syncQueueSnapshot();
       // Give the snapshot burst a moment to drain, then treat later frames as live.
       armTimer = setTimeout(armLive, 750);
     };

@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gorilla/websocket"
+
 	"github.com/SuperMarioYL/agentq/internal/protocol"
 )
 
@@ -565,6 +567,149 @@ func TestServer_PostEnvelopeExpiredOnArrivalReturnsImmediately(t *testing.T) {
 	}
 	if elapsed > time.Second {
 		t.Errorf("post blocked %v for an already-expired envelope; want an immediate return (< server TTL)", elapsed)
+	}
+}
+
+// dialWS opens a WebSocket client connection to the test server's /ws
+// endpoint. token is appended as ?t= when non-empty.
+func dialWS(t *testing.T, httpURL, token string) *websocket.Conn {
+	t.Helper()
+	wsURL := "ws" + strings.TrimPrefix(httpURL, "http") + "/ws"
+	if token != "" {
+		wsURL += "?t=" + token
+	}
+	dialer := websocket.Dialer{HandshakeTimeout: 2 * time.Second}
+	conn, _, err := dialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial %s: %v", wsURL, err)
+	}
+	return conn
+}
+
+// drainBootstrapEnvelopes reads frames from a freshly-dialed WS connection
+// for up to timeout, returning the set of envelope IDs seen in `envelope`
+// (EventNewEnvelope) frames. The daemon pushes the current live queue as a
+// burst of `envelope` frames immediately after connect (server.go
+// websocketHandler) before any live events; this drains that burst. Once the
+// burst is exhausted ReadMessage blocks until the deadline, which is how the
+// caller observes "the snapshot is over".
+func drainBootstrapEnvelopes(t *testing.T, conn *websocket.Conn, timeout time.Duration) map[string]bool {
+	t.Helper()
+	seen := map[string]bool{}
+	_ = conn.SetReadDeadline(time.Now().Add(timeout))
+	for {
+		_, data, err := conn.ReadMessage()
+		if err != nil {
+			break // deadline or closed — burst drained
+		}
+		var ev Event
+		if err := json.Unmarshal(data, &ev); err != nil {
+			continue
+		}
+		if ev.Kind == EventNewEnvelope && ev.Envelope != nil {
+			seen[ev.Envelope.ID] = true
+		}
+	}
+	return seen
+}
+
+// TestServer_ReconnectBootstrapSnapshotIsResyncSource guards
+// fix-ws-reconnect-leaves-stale-cards. The client contract the fix relies on
+// is that GET /api/queue and the WebSocket bootstrap snapshot are the
+// authoritative resync source: they reflect ONLY live envelopes, so a
+// reconnecting phone that re-fetches /api/queue (app.js syncQueueSnapshot on
+// ws.onopen) can correctly drop cards that were answered/expired/evicted
+// during the disconnect. The daemon's WS handler does NOT replay the
+// answer/removal events the phone missed (the prior subscriber was cancelled
+// when the old handler returned); the bootstrap snapshot is the resync.
+//
+// Scenario: the phone knows about card A, then the WS drops. While
+// disconnected, A is answered by another phone (202 — persisted for audit, no
+// live waiter) and a fresh card B is posted and evicted by a wrapper timeout
+// (504 — deleted from the store). On reconnect, both the fresh WS bootstrap
+// burst and GET /api/queue must exclude A (answered → filtered by
+// ListEnvelopes) and B (evicted → deleted), so the phone's syncQueueSnapshot
+// drops the stale A and never re-adds B.
+func TestServer_ReconnectBootstrapSnapshotIsResyncSource(t *testing.T) {
+	ts, store := newTestServer(t, "")
+
+	// A live card the phone knows about before the drop.
+	envA := &protocol.ApprovalEnvelope{
+		ID: "resync-A", AgentID: "a", Prompt: "p",
+		Choices:   []protocol.Choice{{Key: "y"}},
+		ExpiresAt: time.Now().Add(time.Hour),
+	}
+	if err := store.PutEnvelope(envA); err != nil {
+		t.Fatalf("PutEnvelope A: %v", err)
+	}
+
+	// Initial connect: the bootstrap snapshot must carry A so the phone knows it.
+	ws1 := dialWS(t, ts.URL, "")
+	defer ws1.Close()
+	seen1 := drainBootstrapEnvelopes(t, ws1, 500*time.Millisecond)
+	if !seen1["resync-A"] {
+		t.Fatalf("initial bootstrap snapshot=%v; want resync-A (phone must know A before the drop)", seen1)
+	}
+
+	// --- Phone disconnects (screen off / WS drop). The prior subscriber is
+	// cancelled when ws1's handler returns, so events broadcast during this
+	// window never reach the phone. ---
+	_ = ws1.Close()
+	time.Sleep(50 * time.Millisecond) // let the server tear down ws1's subscriber
+
+	// --- While disconnected: A is answered by another phone, and a fresh card
+	// B is posted then evicted by a wrapper timeout. Neither event reaches the
+	// phone; the resync must come from the bootstrap snapshot + GET /api/queue
+	// on reconnect. ---
+	ansRes, err := http.Post(ts.URL+"/api/queue/resync-A/answer",
+		"application/json", strings.NewReader(`{"choice_key":"y"}`))
+	if err != nil {
+		t.Fatalf("answer A: %v", err)
+	}
+	if ansRes.StatusCode != http.StatusAccepted {
+		t.Fatalf("answer A status=%d want 202 (persisted for audit, no live waiter)", ansRes.StatusCode)
+	}
+	ansRes.Body.Close()
+
+	envB := protocol.ApprovalEnvelope{
+		ID: "resync-B", AgentID: "a", Prompt: "p",
+		Choices:   []protocol.Choice{{Key: "y"}},
+		ExpiresAt: time.Now().Add(150 * time.Millisecond), // short → POST times out and evicts
+	}
+	bBody, _ := json.Marshal(envB)
+	postRes, err := http.Post(ts.URL+"/api/envelopes", "application/json", bytes.NewReader(bBody))
+	if err != nil {
+		t.Fatalf("post B: %v", err)
+	}
+	if postRes.StatusCode != http.StatusGatewayTimeout {
+		t.Fatalf("post B status=%d want 504 (evicted on wrapper timeout)", postRes.StatusCode)
+	}
+	postRes.Body.Close()
+
+	// --- Reconnect: a fresh WS subscriber. The bootstrap snapshot is the
+	// resync source and must exclude the answered A and the evicted B. ---
+	ws2 := dialWS(t, ts.URL, "")
+	defer ws2.Close()
+	seen2 := drainBootstrapEnvelopes(t, ws2, 500*time.Millisecond)
+	if seen2["resync-A"] || seen2["resync-B"] {
+		t.Fatalf("reconnect bootstrap snapshot=%v; want neither resync-A (answered) nor resync-B (evicted) — the snapshot is the resync source and must exclude dead cards", seen2)
+	}
+
+	// The same live state must be visible via the REST snapshot app.js
+	// re-fetches in syncQueueSnapshot on reconnect.
+	listRes, err := http.Get(ts.URL + "/api/queue")
+	if err != nil {
+		t.Fatalf("queue list: %v", err)
+	}
+	defer listRes.Body.Close()
+	var list []protocol.ApprovalEnvelope
+	if err := json.NewDecoder(listRes.Body).Decode(&list); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	for _, e := range list {
+		if e.ID == "resync-A" || e.ID == "resync-B" {
+			t.Fatalf("GET /api/queue=%+v; want neither resync-A nor resync-B (REST snapshot must match the resync source)", list)
+		}
 	}
 }
 
