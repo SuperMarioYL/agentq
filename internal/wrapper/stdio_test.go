@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"os/exec"
 	"strings"
 	"sync"
 	"testing"
@@ -344,8 +346,12 @@ func TestWrapperProcess_ExpiryUnblocksAnswerRead(t *testing.T) {
 }
 
 // TestWrapperProcess_ChildDoneUnblocksAnswerRead guards the child-exit path:
-// when the wrapped child dies mid-prompt, the wrapper must observe it and unblock
-// the answer read (forwarding the default) instead of parking on stdin.
+// when the wrapped child dies mid-prompt, the wrapper must observe it and
+// unblock the answer read WITHOUT forwarding the default to the child — the
+// child is gone, so writing its already-closed stdin would EPIPE and mask the
+// child's real exit status behind a broken-pipe error
+// (fix-child-exit-midprompt-broken-pipe). Process returns nil so Run surfaces
+// waitErr (the child's actual exit code) instead.
 func TestWrapperProcess_ChildDoneUnblocksAnswerRead(t *testing.T) {
 	answers := newBlockingReader()
 	defer answers.Close()
@@ -380,8 +386,11 @@ func TestWrapperProcess_ChildDoneUnblocksAnswerRead(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("Process did not return after child exit — answer read still blocking")
 	}
-	if got := childIn.String(); got != "n\n" {
-		t.Errorf("childIn=%q want default choice n forwarded on child exit", got)
+	// The default choice is NOT forwarded once the child has exited: the write
+	// is suppressed so Run can surface the child's real exit status instead of
+	// a broken-pipe error from writing to a dead stdin.
+	if got := childIn.String(); got != "" {
+		t.Errorf("childIn=%q want empty (default not forwarded to a dead child)", got)
 	}
 }
 
@@ -407,6 +416,53 @@ func TestWrapperRun_ChildExitDoesNotHang(t *testing.T) {
 		// Returned — the child-exit signal unblocked the wrapper.
 	case <-time.After(3 * time.Second):
 		t.Fatal("Run hung after child exit — answer read never cancelled")
+	}
+}
+
+// TestWrapperRun_ChildExitMidPromptSurfacesExitStatus guards
+// fix-child-exit-midprompt-broken-pipe end-to-end: when the wrapped child
+// exits non-zero while a prompt is pending, Run must return the child's real
+// exit status (an *exec.ExitError, e.g. code 42), NOT the "broken pipe" error
+// that writing the default choice to the child's already-closed stdin would
+// produce. The pre-fix code forwarded the default to a reaped child's stdin,
+// got EPIPE, and Run returned that broken-pipe error (which is not
+// context.Canceled) INSTEAD of waitErr — masking a crash (e.g. a segfault's
+// 139) behind a misleading "wrapper: forward answer to child: ...broken pipe".
+func TestWrapperRun_ChildExitMidPromptSurfacesExitStatus(t *testing.T) {
+	// A shell that emits a prompt, holds long enough for the wrapper to match
+	// it and park on the (blocking) answer read, then exits 42 (non-zero). No
+	// answer is ever supplied, so awaitAnswer blocks until the child-exit
+	// watcher fires.
+	answers := newBlockingReader()
+	defer answers.Close()
+	w := &Wrapper{
+		Cmd:         []string{"sh", "-c", "echo 'Allow? [y/N]'; sleep 0.3; exit 42"},
+		EnvelopeOut: io.Discard,
+		AnswerIn:    answers,
+		Stdout:      io.Discard,
+		Stderr:      io.Discard,
+	}
+	done := make(chan error, 1)
+	go func() { done <- w.Run(context.Background()) }()
+
+	var err error
+	select {
+	case err = <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run hung after child exit — answer read never cancelled")
+	}
+
+	// Run must surface the child's real exit status, not a broken-pipe error.
+	// The broken-pipe error from io.WriteString is an *os.PathError (syscall
+	// EPIPE), not an *exec.ExitError, so errors.As distinguishes the two.
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("Run returned %v (%T), want the child's exit status as an "+
+			"*exec.ExitError (exit 42) — likely a broken-pipe error masking the "+
+			"child exit (fix-child-exit-midprompt-broken-pipe regressed)", err, err)
+	}
+	if got := exitErr.ExitCode(); got != 42 {
+		t.Errorf("exit code=%d, want 42", got)
 	}
 }
 

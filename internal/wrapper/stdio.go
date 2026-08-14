@@ -274,6 +274,22 @@ func (w *Wrapper) Process(ctx context.Context, childOut io.Reader, childIn io.Wr
 		if err != nil {
 			return err
 		}
+		// If the wrapped child already exited (mid-prompt crash), its stdin is
+		// closed and writing the resolved choice would fail with EPIPE/broken
+		// pipe. That write error would be returned from Process and — being
+		// neither nil nor context.Canceled — Run would surface it INSTEAD of
+		// waitErr, masking the child's real exit status (e.g. a segfault's 139)
+		// behind a misleading "wrapper: forward answer to child: ...broken pipe".
+		// Skip the write when the child is already gone so Run falls through to
+		// returning waitErr. The child-still-alive arms (Ctrl-C / envelope
+		// expiry) leave childDoneCh open, so their default is still forwarded
+		// and the agent still unblocks; only the pointless write to an
+		// already-dead child is suppressed. (fix-child-exit-midprompt-broken-pipe)
+		select {
+		case <-w.childDoneCh():
+			return nil
+		default:
+		}
 		if _, err := io.WriteString(childIn, key+"\n"); err != nil {
 			return fmt.Errorf("wrapper: forward answer to child: %w", err)
 		}
