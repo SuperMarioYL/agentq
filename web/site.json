@@ -1,7 +1,7 @@
 {
   "schema": 1,
-  "content_version": "v0.11.0",
-  "generated_at": "2026-08-11",
+  "content_version": "v0.12.0",
+  "generated_at": "2026-08-15",
   "name": "agentq",
   "github": "https://github.com/SuperMarioYL/agentq",
   "host": "agentq.lei6393.com",
@@ -32,7 +32,7 @@
         "zh": "四个终端里的 Agent 不再各自打断你——所有审批提示聚拢成手机上一个按先后排好的队列，一次只放一个，每条标着是哪个 Agent，扫一眼就知道该回答谁。",
         "en": "Four agents in four terminals stop interrupting you one at a time — every prompt gathers into one ordered queue on your phone, one at a time, each tagged with which agent, so a glance tells you who to answer."
       },
-      "chips": ["› 按先后排队", "› 一次只放一个", "› 标着是哪个 Agent", "› 断线重连不留旧卡片"]
+      "chips": ["› 按先后排队", "› 一次只放一个", "› 标着是哪个 Agent", "› 断线重连不留旧卡片", "› Agent 崩了看真实退出码"]
     },
     {
       "title": { "zh": "认得你用的每一个 Agent", "en": "Speaks every agent you use" },
