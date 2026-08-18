@@ -768,3 +768,284 @@ func TestServer_PostEnvelopeTimeoutNoExpiryLeavesStore(t *testing.T) {
 		t.Fatalf("GetEnvelope after timeout err=%v want ErrNotFound", gerr)
 	}
 }
+
+// newTestServerWithRules builds an unauthenticated test server whose postEnvelope
+// path consults the given auto-approve rules. Returns the queue so a test can
+// assert broadcasts / Pending state.
+func newTestServerWithRules(t *testing.T, rules *AutoApproveRules) (*httptest.Server, *Store, *Queue) {
+	t.Helper()
+	store, err := OpenStore(filepath.Join(t.TempDir(), "queue.db"))
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	q := NewQueue()
+	srv := NewServer(Config{
+		Store:       store,
+		Queue:       q,
+		EnvelopeTTL: 2 * time.Second,
+		AutoApprove: rules,
+	})
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+	return ts, store, q
+}
+
+// TestServer_PostEnvelopeAutoApprovesMatchingPrompt guards m_auto_approve_rules:
+// a prompt matching a configured --auto-approve rule is answered with the rule's
+// choice and returns 200 immediately, WITHOUT a human tap on the phone queue.
+// Before the feature the POST would block on Queue.Wait until the server TTL
+// and return 504. The answered card is excluded from the live queue snapshot
+// (ListEnvelopes filters answered envelopes), recorded for audit, and an
+// EventAnswered is broadcast so the PutEnvelope->PutAnswerIfAbsent race window
+// can't leave a stale card on a connected phone.
+func TestServer_PostEnvelopeAutoApprovesMatchingPrompt(t *testing.T) {
+	rules, err := ParseAutoApproveRules([]string{"make *:y"})
+	if err != nil {
+		t.Fatalf("ParseAutoApproveRules: %v", err)
+	}
+	ts, store, q := newTestServerWithRules(t, rules)
+	sub, cancel := q.Subscribe()
+	defer cancel()
+
+	env := protocol.ApprovalEnvelope{
+		ID: "auto-1", AgentID: "a", Prompt: "make test",
+		Choices:   []protocol.Choice{{Key: "y", Label: "Approve", IsDefault: true}, {Key: "n", Label: "Deny"}},
+		ExpiresAt: time.Now().Add(time.Minute),
+	}
+	body, _ := json.Marshal(env)
+	start := time.Now()
+	res, err := http.Post(ts.URL+"/api/envelopes", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d want 200 (auto-approved, no phone tap); a 504 would mean the rule did not short-circuit", res.StatusCode)
+	}
+	var ans protocol.Answer
+	if err := json.NewDecoder(res.Body).Decode(&ans); err != nil {
+		t.Fatalf("decode answer: %v", err)
+	}
+	if ans.EnvelopeID != "auto-1" || ans.ChoiceKey != "y" {
+		t.Fatalf("answer=%+v want {EnvelopeID:auto-1 ChoiceKey:y}", ans)
+	}
+	// Auto-approve must be near-instant, not block for the server TTL.
+	if elapsed := time.Since(start); elapsed > 1500*time.Millisecond {
+		t.Errorf("auto-approve returned in %v; want immediate (< server TTL, no phone tap)", elapsed)
+	}
+
+	// The auto-approved card must NOT appear in the live queue (answered -> filtered).
+	listRes, err := http.Get(ts.URL + "/api/queue")
+	if err != nil {
+		t.Fatalf("queue list: %v", err)
+	}
+	defer listRes.Body.Close()
+	var list []protocol.ApprovalEnvelope
+	_ = json.NewDecoder(listRes.Body).Decode(&list)
+	for _, e := range list {
+		if e.ID == "auto-1" {
+			t.Errorf("auto-approved card still in queue: %+v", list)
+		}
+	}
+
+	// The audit answer must be recorded with the rule's choice.
+	stored, gerr := store.GetAnswer("auto-1")
+	if gerr != nil || stored.ChoiceKey != "y" {
+		t.Errorf("audit answer=%+v err=%v want ChoiceKey=y", stored, gerr)
+	}
+
+	// A connected phone must be told to drop the card (BroadcastAnswered) so the
+	// PutEnvelope->PutAnswerIfAbsent race window can't leave a stale card.
+	select {
+	case ev := <-sub:
+		if ev.Kind != EventAnswered || ev.Answer == nil || ev.Answer.EnvelopeID != "auto-1" || ev.Answer.ChoiceKey != "y" {
+			t.Errorf("unexpected broadcast: %+v", ev)
+		}
+	case <-time.After(time.Second):
+		t.Error("expected an EventAnswered broadcast for the auto-approved card")
+	}
+}
+
+// TestServer_PostEnvelopeNonMatchingPromptStillCardsPhone guards m_auto_approve_rules:
+// a prompt that does NOT match any auto-approve rule follows the unchanged
+// human-triage path — the POST BLOCKS until a human answers via the phone, and
+// the wrapper receives the HUMAN's choice (not a rule choice). This proves the
+// auto-approve branch only short-circuits matching prompts; an unrelated `rm
+// -rf` prompt still cards the phone (the plan's "Done" criterion).
+func TestServer_PostEnvelopeNonMatchingPromptStillCardsPhone(t *testing.T) {
+	rules, err := ParseAutoApproveRules([]string{"make *:y"})
+	if err != nil {
+		t.Fatalf("ParseAutoApproveRules: %v", err)
+	}
+	ts, store, _ := newTestServerWithRules(t, rules)
+
+	env := protocol.ApprovalEnvelope{
+		ID: "human-1", AgentID: "a", Prompt: "rm -rf /tmp",
+		Choices:   []protocol.Choice{{Key: "y", Label: "Approve", IsDefault: true}, {Key: "n", Label: "Deny"}},
+		ExpiresAt: time.Now().Add(time.Minute),
+	}
+	body, _ := json.Marshal(env)
+
+	type postResult struct {
+		ans protocol.Answer
+		err error
+	}
+	postCh := make(chan postResult, 1)
+	go func() {
+		res, err := http.Post(ts.URL+"/api/envelopes", "application/json", bytes.NewReader(body))
+		if err != nil {
+			postCh <- postResult{err: err}
+			return
+		}
+		defer res.Body.Close()
+		buf := new(bytes.Buffer)
+		_, _ = buf.ReadFrom(res.Body)
+		if res.StatusCode != http.StatusOK {
+			postCh <- postResult{err: fmt.Errorf("post status=%d body=%s", res.StatusCode, buf.String())}
+			return
+		}
+		var ans protocol.Answer
+		if err := json.Unmarshal(buf.Bytes(), &ans); err != nil {
+			postCh <- postResult{err: err}
+			return
+		}
+		postCh <- postResult{ans: ans}
+	}()
+
+	// The envelope must persist (the auto-approve branch did NOT short-circuit;
+	// the card entered the human-triage queue and the POST is now blocking on
+	// Queue.Wait).
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, gerr := store.GetEnvelope(env.ID); gerr == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("envelope never persisted (auto-approve may have short-circuited a non-matching prompt)")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// The POST must still be blocked — a non-matching prompt is NOT auto-approved.
+	select {
+	case got := <-postCh:
+		t.Fatalf("non-matching prompt returned immediately with %+v; want it to block on the phone queue", got)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	// The human taps "n" (Deny) on the phone. Asserting the POST returns the
+	// HUMAN choice "n" (not a rule choice) proves the card went through the
+	// queue, not the auto-approve branch.
+	res, err := http.Post(
+		ts.URL+"/api/queue/human-1/answer",
+		"application/json",
+		strings.NewReader(`{"choice_key":"n"}`),
+	)
+	if err != nil {
+		t.Fatalf("answer: %v", err)
+	}
+	res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("answer status=%d want 200", res.StatusCode)
+	}
+	select {
+	case got := <-postCh:
+		if got.err != nil {
+			t.Fatalf("post envelope: %v", got.err)
+		}
+		if got.ans.ChoiceKey != "n" || got.ans.EnvelopeID != "human-1" {
+			t.Errorf("answer=%+v want the HUMAN choice n (not a rule choice)", got.ans)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("post envelope did not return after the human answer (the card may not have entered the queue)")
+	}
+}
+
+// TestServer_AutoApproveRuleChoiceNotInEnvelopeFallsThrough guards m_auto_approve_rules:
+// a rule whose Choice is not among the envelope's choices must NOT auto-approve
+// with an invalid key — it falls through to the unchanged human-triage path so
+// the operator still taps the phone. This is the choiceKnown guard in
+// postEnvelope, which keeps the auto-approve path from answering with a key the
+// wrapped agent would reject.
+func TestServer_AutoApproveRuleChoiceNotInEnvelopeFallsThrough(t *testing.T) {
+	rules, err := ParseAutoApproveRules([]string{"make *:z"}) // "z" is not a choice below
+	if err != nil {
+		t.Fatalf("ParseAutoApproveRules: %v", err)
+	}
+	ts, _, q := newTestServerWithRules(t, rules)
+
+	env := protocol.ApprovalEnvelope{
+		ID: "fall-1", AgentID: "a", Prompt: "make test",
+		Choices:   []protocol.Choice{{Key: "y", Label: "Approve", IsDefault: true}, {Key: "n", Label: "Deny"}},
+		ExpiresAt: time.Now().Add(time.Minute),
+	}
+	body, _ := json.Marshal(env)
+
+	type postResult struct {
+		ans protocol.Answer
+		err error
+	}
+	postCh := make(chan postResult, 1)
+	go func() {
+		res, err := http.Post(ts.URL+"/api/envelopes", "application/json", bytes.NewReader(body))
+		if err != nil {
+			postCh <- postResult{err: err}
+			return
+		}
+		defer res.Body.Close()
+		buf := new(bytes.Buffer)
+		_, _ = buf.ReadFrom(res.Body)
+		if res.StatusCode != http.StatusOK {
+			postCh <- postResult{err: fmt.Errorf("post status=%d body=%s", res.StatusCode, buf.String())}
+			return
+		}
+		var ans protocol.Answer
+		_ = json.Unmarshal(buf.Bytes(), &ans)
+		postCh <- postResult{ans: ans}
+	}()
+
+	// The prompt matches "make *" but the rule's choice "z" is not in {y,n}, so
+	// the auto-approve branch must fall through to human triage: the card must
+	// enter the queue (Pending) and the POST must keep blocking.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if q.Pending("fall-1") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("card did not enter the queue; auto-approve with an invalid choice must fall through to human triage")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	select {
+	case got := <-postCh:
+		t.Fatalf("auto-approve returned immediately with an invalid choice %+v; want it to fall through to human triage", got)
+	case <-time.After(150 * time.Millisecond):
+		// good: still blocked on Queue.Wait
+	}
+
+	// The human answers with a VALID choice; the POST must then return it.
+	res, err := http.Post(
+		ts.URL+"/api/queue/fall-1/answer",
+		"application/json",
+		strings.NewReader(`{"choice_key":"y"}`),
+	)
+	if err != nil {
+		t.Fatalf("answer: %v", err)
+	}
+	res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("answer status=%d want 200", res.StatusCode)
+	}
+	select {
+	case got := <-postCh:
+		if got.err != nil {
+			t.Fatalf("post envelope: %v", got.err)
+		}
+		if got.ans.ChoiceKey != "y" {
+			t.Errorf("answer=%+v want ChoiceKey=y (the human's valid choice, not the invalid rule choice z)", got.ans)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("post envelope did not return after the human answer")
+	}
+}

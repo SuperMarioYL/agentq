@@ -54,6 +54,18 @@ func RunAttach(opts AttachOptions, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	// resolveToken only checks that a source is PRESENT, not that its trimmed
+	// value is non-empty: a whitespace-only "--token ' '", an empty
+	// "--token-file" (os.ReadFile succeeds on a 0-byte file), or a spaces-only
+	// $AGENTQ_TOKEN all TrimSpace to "" and return ("", nil). Without this
+	// guard resolveDaemonURL builds a QR whose "?t=" is empty and the daemon
+	// (which always has a token) 401-rejects every phone request, so the
+	// operator gets an unscannable, silently dead QR on the primary
+	// phone-attach surface with no error. Fail loudly instead.
+	// (fix-attach-empty-token-silent-broken-qr)
+	if strings.TrimSpace(token) == "" {
+		return fmt.Errorf("attach: resolved token is empty (pass --token, set AGENTQ_TOKEN, or fix --token-file)")
+	}
 	target, err := resolveDaemonURL(opts, token)
 	if err != nil {
 		return err

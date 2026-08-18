@@ -29,11 +29,13 @@ func init() {
 
 // ServeOptions are the flag values for `agentq serve`.
 type ServeOptions struct {
-	Listen   string
-	DataDir  string
-	Token    string
-	TokenOut string
-	LAN      bool
+	Listen          string
+	DataDir         string
+	Token           string
+	TokenOut        string
+	LAN             bool
+	AutoApprove     []string
+	AutoApproveFile string
 }
 
 // NewServeCmd builds the `serve` subcommand.
@@ -64,6 +66,10 @@ to bind 0.0.0.0 and accept connections from your phone.`,
 		"optional file to write the active token to (consumed by `agentq attach`)")
 	cmd.Flags().BoolVar(&opts.LAN, "lan", false,
 		"shorthand to bind 0.0.0.0 so phones can reach the daemon over LAN")
+	cmd.Flags().StringArrayVar(&opts.AutoApprove, "auto-approve", nil,
+		`auto-approve rule "<glob>:<choice>" — a prompt matching <glob> (path.Match shell glob, "*" = any run) is answered with <choice> without a phone tap (repeatable; e.g. 'make *:y', 'git status:y')`)
+	cmd.Flags().StringVar(&opts.AutoApproveFile, "auto-approve-file", "",
+		`file with auto-approve rules, one "<glob>:<choice>" per line (blank/#-prefixed lines ignored); merged with --auto-approve`)
 	return cmd
 }
 
@@ -103,17 +109,41 @@ func RunServe(parent context.Context, opts ServeOptions, stdout, stderr io.Write
 		}
 	}
 
+	// Compile auto-approve rules from the repeatable --auto-approve flags plus
+	// the optional --auto-approve-file. A nil/empty rule set leaves the daemon
+	// on the unchanged human-triage path. A bad rule (bad glob, missing colon)
+	// fails the daemon at startup so the operator sees it immediately.
+	autoSpecs := opts.AutoApprove
+	if opts.AutoApproveFile != "" {
+		fileSpecs, ferr := daemon.LoadAutoApproveFile(opts.AutoApproveFile)
+		if ferr != nil {
+			return ferr
+		}
+		autoSpecs = append(autoSpecs, fileSpecs...)
+	}
+	var autoRules *daemon.AutoApproveRules
+	if len(autoSpecs) > 0 {
+		autoRules, err = daemon.ParseAutoApproveRules(autoSpecs)
+		if err != nil {
+			return err
+		}
+	}
+
 	cfg := daemon.Config{
-		Listen: opts.Listen,
-		Token:  token,
-		Store:  store,
-		Queue:  daemon.NewQueue(),
+		Listen:      opts.Listen,
+		Token:       token,
+		Store:       store,
+		Queue:       daemon.NewQueue(),
+		AutoApprove: autoRules,
 	}
 	srv := daemon.NewServer(cfg)
 
 	fmt.Fprintf(stdout, "agentq daemon listening on http://%s\n", opts.Listen)
 	fmt.Fprintf(stdout, "data-dir : %s\n", dir)
 	fmt.Fprintf(stdout, "token    : %s\n", token)
+	if autoRules != nil && !autoRules.Empty() {
+		fmt.Fprintf(stdout, "auto-approve : %d rule(s) active (matching prompts skip the phone queue)\n", autoRules.Len())
+	}
 	if opts.TokenOut != "" {
 		fmt.Fprintf(stdout, "token written to %s — run `agentq attach --token-file %s`.\n",
 			opts.TokenOut, opts.TokenOut)

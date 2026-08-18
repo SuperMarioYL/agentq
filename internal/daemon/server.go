@@ -59,6 +59,15 @@ type Config struct {
 
 	// Queue is the in-flight waiter hub. Required.
 	Queue *Queue
+
+	// AutoApprove is the optional compiled auto-approve rule set. When non-nil
+	// and non-empty, an envelope whose Prompt matches a rule is answered with
+	// the rule's choice BEFORE entering the human-triage queue, so trusted
+	// commands (make test, git status) unblock without a phone tap. A matching
+	// rule whose choice is not among the envelope's choices falls through to
+	// human triage. Nil/empty leaves the daemon on the unchanged phone-triage
+	// path for every prompt.
+	AutoApprove *AutoApproveRules
 }
 
 // Server wires the echo router and middleware. Use Server.Handler
@@ -209,6 +218,36 @@ func (s *Server) postEnvelope(c echo.Context) error {
 	}
 	if err := s.cfg.Store.PutEnvelope(&env); err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	// Auto-approve short-circuit (m_auto_approve_rules): a prompt matching a
+	// configured rule is answered with the rule's choice BEFORE entering the
+	// phone queue, so trusted commands (make test, git status) unblock without a
+	// human tap. Mirrors the 202 answer path — PutAnswerIfAbsent (create-only
+	// audit record) + BroadcastAnswered (drop the card on any subscriber that
+	// snapshotted it in the PutEnvelope→PutAnswerIfAbsent window) — and returns
+	// 200 immediately so the wrapper unblocks. A rule whose Choice is not among
+	// the envelope's choices does NOT auto-approve: it falls through to the
+	// unchanged human-triage path below. The ApprovalEnvelope wire format, the
+	// bbolt store, and the web UI are unchanged; only this new branch + a CLI
+	// flag are added.
+	if s.cfg.AutoApprove != nil {
+		if choice, ok := s.cfg.AutoApprove.Match(env.Prompt); ok && choiceKnown(env.Choices, choice) {
+			ans := protocol.Answer{
+				EnvelopeID: env.ID,
+				ChoiceKey:  choice,
+				AnsweredAt: time.Now().UTC(),
+			}
+			stored, err := s.cfg.Store.PutAnswerIfAbsent(&ans)
+			if err != nil {
+				if errors.Is(err, ErrAnswerExists) {
+					s.cfg.Queue.BroadcastAnswered(*stored)
+					return c.JSON(http.StatusOK, stored)
+				}
+				return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+			}
+			s.cfg.Queue.BroadcastAnswered(ans)
+			return c.JSON(http.StatusOK, ans)
+		}
 	}
 	if err := s.cfg.Queue.Register(&env); err != nil {
 		return echo.NewHTTPError(http.StatusConflict, err.Error())
