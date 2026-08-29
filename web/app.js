@@ -88,6 +88,16 @@
           body: JSON.stringify({ choice_key: choiceKey }),
         },
       );
+      // 409 (already answered by another phone) and 410 (expired) are terminal:
+      // the card is dead, so remove it locally instead of leaving a stuck,
+      // retryable-error card. The server still broadcasts the removal, but that
+      // best-effort fan-out can drop the event on a slow subscriber (cap-16
+      // channel), which would leave a dead card stuck in error state with
+      // re-enabled buttons until the next WebSocket reconnect reconcile.
+      if (res.status === 409 || res.status === 410) {
+        removeCard(id);
+        return;
+      }
       if (!res.ok) {
         const text = await res.text();
         node.classList.add('card--error');

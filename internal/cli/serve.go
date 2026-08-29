@@ -67,7 +67,7 @@ to bind 0.0.0.0 and accept connections from your phone.`,
 	cmd.Flags().BoolVar(&opts.LAN, "lan", false,
 		"shorthand to bind 0.0.0.0 so phones can reach the daemon over LAN")
 	cmd.Flags().StringArrayVar(&opts.AutoApprove, "auto-approve", nil,
-		`auto-approve rule "<glob>:<choice>" — a prompt matching <glob> (path.Match shell glob, "*" = any run) is answered with <choice> without a phone tap (repeatable; e.g. 'make *:y', 'git status:y')`)
+		`auto-approve rule "<glob>:<choice>" — a prompt matching <glob> (shell-style glob where "*" matches any run of bytes, including "/") is answered with <choice> without a phone tap (repeatable; e.g. 'make *:y', 'git status:y')`)
 	cmd.Flags().StringVar(&opts.AutoApproveFile, "auto-approve-file", "",
 		`file with auto-approve rules, one "<glob>:<choice>" per line (blank/#-prefixed lines ignored); merged with --auto-approve`)
 	return cmd
