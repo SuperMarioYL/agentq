@@ -1,7 +1,7 @@
 {
   "schema": 1,
-  "content_version": "v0.14.0",
-  "generated_at": "2026-08-22",
+  "content_version": "v0.15.0",
+  "generated_at": "2026-08-29",
   "name": "agentq",
   "github": "https://github.com/SuperMarioYL/agentq",
   "host": "agentq.lei6393.com",
@@ -70,7 +70,8 @@
         "› 一次只放一个",
         "› 标着是哪个 Agent",
         "› 断线重连不留旧卡片",
-        "› Agent 崩了看真实退出码"
+        "› Agent 崩了看真实退出码",
+        "› 已答/过期卡片不残留"
       ]
     },
     {
