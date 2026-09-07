@@ -1,136 +1,229 @@
 {
-  "schema": 1,
-  "content_version": "v0.15.0",
-  "generated_at": "2026-08-29",
+  "schema": 3,
   "name": "agentq",
   "github": "https://github.com/SuperMarioYL/agentq",
   "host": "agentq.lei6393.com",
+  "palette": "auto",
   "lang": {
     "primary": "zh",
     "toggle": true
   },
-  "accent": [
-    "#43b98d"
-  ],
+  "meta": {
+    "visual_profile": "neon-particle",
+    "demo_source": "docs/demo-results.json",
+    "implementation_version": "0.11.0"
+  },
   "hero": {
     "eyebrow": {
-      "zh": "定好规则 · 全本地 · 手机审批",
-      "en": "Set the rules · Fully local · Phone approvals"
+      "zh": "Agent 审批 · 本地队列",
+      "en": "AGENT APPROVALS · LOCAL QUEUE"
     },
     "headline": {
-      "zh": "信得过的命令自动放行\n该问你的还进手机一个队列",
-      "en": "Trusted commands pass on their own\n— the rest still queue on your phone"
+      "zh": "少找一个终端，\n多看清一次审批。",
+      "en": "One approval queue.\nKeep each session in view."
     },
     "sub": {
-      "zh": "写一条「make *: 放行」这样的规则，匹配上的提示直接答掉、不再弹手机，没匹配上的还照旧进手机队列一条条来——该拦的拦，该放行的别再麻烦你。",
-      "en": "Write a rule like 'make *: approve' and matching prompts are answered on the spot without a phone tap, while anything that doesn't match still queues on your phone one at a time — block what matters, stop babysitting the safe ones."
+      "zh": "agentq 将多个编码 Agent 的审批请求汇入本地网页队列，把你的选择回传给等待中的会话。",
+      "en": "agentq collects coding-agent approval requests in a local browser queue and returns each choice to the waiting session."
     },
-    "command": "agentq serve --auto-approve 'make *:y' --lan",
+    "href": "#quickstart",
     "cta": {
-      "zh": "在 GitHub 上开始",
-      "en": "Get started on GitHub"
+      "zh": "运行示例",
+      "en": "Run the example"
     },
     "ctaGithub": {
       "zh": "查看源码",
       "en": "View source"
-    },
-    "scroll": {
-      "zh": "看它怎么工作",
-      "en": "See how it works"
+    }
+  },
+  "scene": {
+    "kind": "neon-graph",
+    "fallback": "/assets/presentation/scene-dark.svg",
+    "fallbackLight": "/assets/presentation/scene-light.svg",
+    "caption": {
+      "zh": "把分散的审批放进同一个队列",
+      "en": "Bring scattered approvals into one queue."
     }
   },
   "advantages": [
     {
       "title": {
-        "zh": "信得过的命令，定好规则就自动放行",
-        "en": "Trusted commands pass on their own once you set the rules"
+        "zh": "会话身份留在请求里",
+        "en": "Keep session identity"
       },
       "body": {
-        "zh": "哪些命令信得过、可以自动放行，由你定；规则没匹配上、或你想填的选项对不上这条提示，它就老老实实把这条塞回手机队列等你——不会偷偷替你按掉任何该问的事。",
-        "en": "You decide which commands are trusted enough to pass on their own; if a rule doesn't match, or the choice you set isn't on that prompt, it goes back to your phone queue for you — nothing dangerous slips through unattended."
-      },
-      "chips": [
-        "› 规则可叠多条",
-        "› 匹配即放行",
-        "› 不匹配仍进手机",
-        "› 选项对不上退回人工"
-      ]
+        "zh": "每条信封带 agent_id、上下文和选项，答复按 envelope_id 回传。",
+        "en": "Each envelope carries agent_id, context and choices; replies target its envelope_id."
+      }
     },
     {
       "title": {
-        "zh": "几个 Agent 抢着问 → 手机排一条队",
-        "en": "Several agents asking at once → one phone queue"
+        "zh": "本地保存审批状态",
+        "en": "Persist state locally"
       },
       "body": {
-        "zh": "四个终端里的 Agent 不再各自打断你——所有审批提示聚拢成手机上一个按先后排好的队列，一次只放一个，每条标着是哪个 Agent，扫一眼就知道该回答谁。",
-        "en": "Four agents in four terminals stop interrupting you one at a time — every prompt gathers into one ordered queue on your phone, one at a time, each tagged with which agent, so a glance tells you who to answer."
-      },
-      "chips": [
-        "› 按先后排队",
-        "› 一次只放一个",
-        "› 标着是哪个 Agent",
-        "› 断线重连不留旧卡片",
-        "› Agent 崩了看真实退出码",
-        "› 已答/过期卡片不残留"
-      ]
+        "zh": "serve 使用 bbolt 保存请求和答复，网页与 API 消费同一队列。",
+        "en": "serve stores envelopes and answers in bbolt, shared by the browser and API."
+      }
     },
     {
       "title": {
-        "zh": "认得你用的每一个 Agent",
-        "en": "Speaks every agent you use"
+        "zh": "直接接入协议",
+        "en": "Integrate through the protocol"
       },
       "body": {
-        "zh": "Claude Code 的方括号提示、Cursor 和 Aider 的 (Y)es/(N)o 提示，它都认得——不用为换个 Agent 就重学一遍；想接新 Agent，加个适配就行。",
-        "en": "Claude Code's bracket prompts, Cursor and Aider's (Y)es/(N)o dialect — it understands all of them, so switching agents doesn't mean relearning; adding a new one is just one adapter."
-      },
-      "chips": [
-        "› 认得多种提问格式",
-        "› 自动识别 Agent",
-        "› 加新 Agent 很轻"
-      ]
-    },
-    {
-      "title": {
-        "zh": "审批不出本机，不上云",
-        "en": "Approvals stay on your machine — no cloud"
-      },
-      "body": {
-        "zh": "所有进程都跑在你自己的机器上：扫个码就能在手机上审批，审批记录也留在本机——没有 Docker、没有云服务、没有外部数据库。",
-        "en": "Every process runs on your own machine: scan a QR to approve from your phone, with records staying on your machine — no Docker, no cloud service, no external database."
-      },
-      "chips": [
-        "› 只听本机",
-        "› 记录留本机",
-        "› 无 Docker / 云"
-      ]
+        "zh": "自定义运行时可以提交 HTTP 信封，不必模拟某个终端提示。",
+        "en": "Custom runtimes can submit HTTP envelopes without imitating a terminal prompt."
+      }
     }
   ],
-  "scene": {
-    "kind": "hub-nodes",
-    "nodes": [
-      "Claude Code",
-      "Cursor",
-      "Aider"
+  "story": {
+    "intro": {
+      "title": {
+        "zh": "把分散的审批放进同一个队列",
+        "en": "Bring scattered approvals into one queue."
+      },
+      "body": {
+        "zh": "同时运行多个会话时，审批请求会散落在不同终端。agentq 用带会话标识的 ApprovalEnvelope 把问题汇到同一处，保留选项与上下文，再把答复交回原请求方。你仍然决定每条请求是否应当通过。",
+        "en": "Parallel sessions can leave approval prompts scattered across terminals. agentq collects ApprovalEnvelopes with session labels, choices and context, then returns the answer to the original requester. You still decide which requests to approve."
+      }
+    },
+    "sections": [
+      {
+        "title": {
+          "zh": "从输入到结果",
+          "en": "From input to result"
+        },
+        "body": {
+          "zh": "脚本在临时目录构建并启动真实 daemon，提交一个构造审批请求，再通过 HTTP 选择 n。输出显示队列从 0 变成包含 demo-approval，答复返回原请求，随后队列回到 0。它不启动编码 Agent，不执行审批文字中的动作。",
+          "en": "The script builds and starts the real daemon in a temporary directory, submits one constructed approval and answers n over HTTP. The queue moves from zero to demo-approval, the answer returns to the requester, and the queue returns to zero. It launches no coding agent and executes no action described in the prompt."
+        },
+        "image": {
+          "light": "/assets/presentation/process-light.svg",
+          "dark": "/assets/presentation/process-dark.svg",
+          "alt": {
+            "zh": "从输入到结果",
+            "en": "From input to result"
+          }
+        }
+      },
+      {
+        "title": {
+          "zh": "实现中的分工",
+          "en": "How the implementation fits together"
+        },
+        "body": {
+          "zh": "wrap 识别子进程的提示并生成 ApprovalEnvelope。使用 --daemon 时，它通过本地 HTTP 转发请求；serve 将信封与答复保存到 bbolt，通过 REST 和 WebSocket 提供队列，内嵌网页用于处理请求。attach 生成访问地址和二维码。默认 wrap 仍可使用 stdin/stdout 协议。",
+          "en": "wrap recognizes child-process prompts and produces ApprovalEnvelopes. With --daemon it forwards requests over local HTTP. serve persists envelopes and answers in bbolt and exposes the queue through REST, WebSocket and an embedded page. attach generates an access URL and QR code. Plain wrap also supports the stdin/stdout protocol."
+        },
+        "image": {
+          "light": "/assets/presentation/architecture-light.svg",
+          "dark": "/assets/presentation/architecture-dark.svg",
+          "alt": {
+            "zh": "实现中的分工",
+            "en": "How the implementation fits together"
+          }
+        }
+      },
+      {
+        "title": {
+          "zh": "接入现有工作流",
+          "en": "Connect existing workflows"
+        },
+        "body": {
+          "zh": "agentq 将多个编码 Agent 的审批请求汇入本地网页队列，把你的选择回传给等待中的会话。",
+          "en": "agentq collects coding-agent approval requests in a local browser queue and returns each choice to the waiting session."
+        },
+        "image": {
+          "light": "/assets/presentation/integrations-light.svg",
+          "dark": "/assets/presentation/integrations-dark.svg",
+          "alt": {
+            "zh": "接入现有工作流",
+            "en": "Connect existing workflows"
+          }
+        }
+      }
+    ],
+    "details": [
+      {
+        "title": {
+          "zh": "配置与边界",
+          "en": "Configuration and limits"
+        },
+        "body": {
+          "zh": "演示只验证本地 HTTP 审批往返，不验证手机网络、真实 Agent 或所有终端交互。",
+          "en": "The demo verifies a local HTTP approval round trip, not phone networking, real agents or every terminal interaction."
+        }
+      }
     ]
   },
-  "cta": {
-    "headline": {
-      "zh": "该放行的，别再点一遍",
-      "en": "Stop tapping through the safe ones"
+  "demo": {
+    "title": {
+      "zh": "运行自带示例",
+      "en": "Run the supplied example"
     },
-    "sub": {
-      "zh": "一条命令起好规则，扫个码连上手机——信得过的自动放行，该问的还进队列。Apache-2.0 开源，全程本地。",
-      "en": "One command to set the rules, one QR to reach your phone — trusted commands pass on their own, the rest still queue. Apache-2.0 licensed, fully local."
+    "note": {
+      "zh": "v0.11.0 的真实本地 HTTP 往返。输出由示例从实际响应提取稳定字段，不包含动态时间戳；这不是手机、LAN 或第三方 Agent 兼容性验收。",
+      "en": "A real local HTTP round trip on v0.11.0. The example extracts stable fields from actual responses, omitting dynamic timestamps. It is not phone, LAN or third-party agent compatibility acceptance."
     },
-    "button": {
-      "zh": "在 GitHub 上开始",
-      "en": "Get started on GitHub"
-    }
+    "source": "https://github.com/SuperMarioYL/agentq/blob/main/docs/demo-results.json",
+    "steps": [
+      {
+        "label": {
+          "zh": "运行 1",
+          "en": "Run 1"
+        },
+        "body": {
+          "zh": "脚本在临时目录构建并启动真实 daemon，提交一个构造审批请求，再通过 HTTP 选择 n。输出显示队列从 0 变成包含 demo-approval，答复返回原请求，随后队列回到 0。它不启动编码 Agent，不执行审批文字中的动作。",
+          "en": "The script builds and starts the real daemon in a temporary directory, submits one constructed approval and answers n over HTTP. The queue moves from zero to demo-approval, the answer returns to the requester, and the queue returns to zero. It launches no coding agent and executes no action described in the prompt."
+        },
+        "image": "/assets/presentation/demo-0-light.svg",
+        "imageDark": "/assets/presentation/demo-0-dark.svg",
+        "command": "python3 examples/presentation_demo.py",
+        "output": "{\n  \"pending_before\": 0,\n  \"pending_during\": [\n    \"demo-approval\"\n  ],\n  \"answer\": {\n    \"envelope_id\": \"demo-approval\",\n    \"choice_key\": \"n\"\n  },\n  \"pending_after\": 0\n}\n"
+      }
+    ]
   },
+  "quickstart": {
+    "title": {
+      "zh": "运行完整示例",
+      "en": "Run the complete example"
+    },
+    "body": {
+      "zh": "需要 Go 1.24+；下方自带协议示例还需要 Python 3。构建时可能下载 Go 依赖，示例只访问回环地址。",
+      "en": "Requires Go 1.24+ and Python 3 for the supplied protocol demo. Building may download Go dependencies; the demo only contacts loopback."
+    },
+    "steps": [
+      {
+        "title": {
+          "zh": "准备环境",
+          "en": "Prepare the environment"
+        },
+        "code": "git clone https://github.com/SuperMarioYL/agentq.git\ncd agentq\ngo build -o agentq ./cmd/agentq"
+      },
+      {
+        "title": {
+          "zh": "运行本地示例",
+          "en": "Run the local example"
+        },
+        "code": "python3 examples/presentation_demo.py"
+      }
+    ]
+  },
+  "limitations": [
+    {
+      "zh": "演示只验证本地 HTTP 审批往返，不验证手机网络、真实 Agent 或所有终端交互。",
+      "en": "The demo verifies a local HTTP approval round trip, not phone networking, real agents or every terminal interaction."
+    },
+    {
+      "zh": "自动批准是可选 glob 规则，不对请求的安全性作推理。",
+      "en": "Optional automatic approval matches globs; it does not reason about request safety."
+    }
+  ],
   "footer": {
     "tag": {
-      "zh": "Apache-2.0 开源 · 全程本地",
-      "en": "Apache-2.0 open source · fully local"
+      "zh": "Go 1.24+ · Python 3 demo · Apache-2.0",
+      "en": "Go 1.24+ · Python 3 demo · Apache-2.0"
     }
   }
 }

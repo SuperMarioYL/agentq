@@ -1,0 +1,10 @@
+{
+  "version": "0.11.0",
+  "fixture": "Constructed ApprovalEnvelope; real loopback daemon and HTTP round trip. No coding agent is launched.",
+  "steps": [
+    {
+      "command": "python3 examples/presentation_demo.py",
+      "output": "{\n  \"pending_before\": 0,\n  \"pending_during\": [\n    \"demo-approval\"\n  ],\n  \"answer\": {\n    \"envelope_id\": \"demo-approval\",\n    \"choice_key\": \"n\"\n  },\n  \"pending_after\": 0\n}\n"
+    }
+  ]
+}

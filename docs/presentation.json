@@ -1,0 +1,98 @@
+{
+  "name": "agentq",
+  "tagline": "Bring scattered approvals into one queue.",
+  "architecture": {
+    "title": "One queue, explicit reply routes",
+    "nodes": [
+      {
+        "title": "Agent / producer",
+        "detail": "Prompt or HTTP envelope"
+      },
+      {
+        "title": "Wrap / API",
+        "detail": "ApprovalEnvelope transport"
+      },
+      {
+        "title": "Serve",
+        "detail": "Queue and bbolt store"
+      },
+      {
+        "title": "Browser / client",
+        "detail": "Choose an answer"
+      },
+      {
+        "title": "Waiting requester",
+        "detail": "Receive choice_key"
+      }
+    ],
+    "edges": [
+      [
+        0,
+        1
+      ],
+      [
+        1,
+        2
+      ],
+      [
+        2,
+        3
+      ],
+      [
+        3,
+        2
+      ],
+      [
+        2,
+        4
+      ]
+    ]
+  },
+  "process": {
+    "title": "A local approval round trip",
+    "steps": [
+      {
+        "title": "Start daemon",
+        "detail": "Temporary loopback service"
+      },
+      {
+        "title": "Submit request",
+        "detail": "demo-approval enters queue"
+      },
+      {
+        "title": "Answer n",
+        "detail": "HTTP reply reaches requester"
+      },
+      {
+        "title": "Read queue",
+        "detail": "Zero pending requests"
+      }
+    ],
+    "result": "Real local HTTP; no coding-agent process."
+  },
+  "integrations": {
+    "title": "Prompt and protocol integration",
+    "items": [
+      {
+        "title": "stdio",
+        "detail": "Envelope / answer streams"
+      },
+      {
+        "title": "HTTP",
+        "detail": "Submit and answer"
+      },
+      {
+        "title": "WebSocket",
+        "detail": "Queue events"
+      },
+      {
+        "title": "Browser",
+        "detail": "Embedded triage page"
+      },
+      {
+        "title": "bbolt",
+        "detail": "Local persistence"
+      }
+    ]
+  }
+}

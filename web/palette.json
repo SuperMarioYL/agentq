@@ -1,0 +1,38 @@
+{
+  "mode": "auto",
+  "id": "e656dc-e76a9c-e0acf6-6e593f1d7163",
+  "identity": "https://github.com/supermarioyl/agentq",
+  "primary": "#e656dc",
+  "secondary": "#e76a9c",
+  "highlight": "#e0acf6",
+  "dark": {
+    "bg": "#0a0711",
+    "panel": "#13101e",
+    "code": "#140d1c",
+    "ink": "#f9eefd",
+    "muted": "#b29cc2",
+    "line": "#3a183e",
+    "primary": "#e656dc",
+    "secondary": "#e76a9c",
+    "highlight": "#e0acf6",
+    "accent": "#e656dc",
+    "buttonStart": "#bc46b3",
+    "buttonEnd": "#b9557d",
+    "buttonText": "#ffffff"
+  },
+  "light": {
+    "bg": "#fef9fe",
+    "panel": "#fef7fd",
+    "code": "#fdf3fd",
+    "ink": "#27162e",
+    "muted": "#725e86",
+    "line": "#f7cbf4",
+    "primary": "#b343ab",
+    "secondary": "#b15177",
+    "highlight": "#856692",
+    "accent": "#b343ab",
+    "buttonStart": "#bc46b3",
+    "buttonEnd": "#b9557d",
+    "buttonText": "#ffffff"
+  }
+}

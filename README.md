@@ -1,147 +1,131 @@
-# agentq
+[English](README.en.md) | **简体中文**
 
-[English](./README.en.md) | **简体中文**
+<picture>
+  <source media="(max-width: 640px) and (prefers-color-scheme: dark)" srcset="assets/presentation/hero-mobile-dark.svg">
+  <source media="(max-width: 640px)" srcset="assets/presentation/hero-mobile-light.svg">
+  <source media="(prefers-color-scheme: dark)" srcset="assets/presentation/hero-dark.svg">
+  <img src="assets/presentation/hero-light.svg" width="960" alt="agentq — Bring scattered approvals into one queue.">
+</picture>
 
-<p align="center">
-  <img src="https://readme-typing-svg.demolab.com?font=JetBrains+Mono&size=22&duration=2800&pause=900&color=6EA8FF&center=true&vCenter=true&width=720&lines=N+%E4%B8%AA+Claude+Code+%E4%BC%9A%E8%AF%9D+%E2%86%92+%E4%B8%80%E4%B8%AA%E6%89%8B%E6%9C%BA%E9%98%9F%E5%88%97;%E5%BC%80%E6%BA%90+%C2%B7+%E5%8D%95%E4%BA%8C%E8%BF%9B%E5%88%B6+%C2%B7+%E6%9C%AC%E5%9C%B0+LAN" alt="agentq" />
-</p>
+**agentq 将多个编码 Agent 的审批请求汇入本地网页队列，把你的选择回传给等待中的会话。**
 
-<p align="center">
-  <a href="./LICENSE"><img alt="Apache License 2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square"></a>
-  <a href="https://go.dev/"><img alt="Go 1.24" src="https://img.shields.io/badge/go-1.24-00ADD8?style=flat-square&logo=go&logoColor=white"></a>
-  <a href="https://github.com/SuperMarioYL/agentq/releases"><img alt="status" src="https://img.shields.io/badge/release-v0.6.0-51d1a3?style=flat-square"></a>
-  <a href="#"><img alt="Claude Code" src="https://img.shields.io/badge/Claude%20Code-ready-7c5cff?style=flat-square"></a>
-  <a href="#"><img alt="Agent" src="https://img.shields.io/badge/Agent-N%3A1-51d1a3?style=flat-square"></a>
-</p>
-
-> **agentq 把 N 个并行 Claude Code 会话的审批请求收敛到同一个手机队列。**
-
-## 目录
-
-- [为什么需要它](#为什么需要它)
-- [10 秒上手](#10-秒上手)
-- [演示](#演示)
-- [架构](#架构)
-- [HTTP / WebSocket API](#http--websocket-api)
-- [配置](#配置)
-- [对比 affaan-m/everything-claude-code](#对比-affaan-meverything-claude-code)
-- [路线图](#路线图)
-- [协议与贡献](#协议与贡献)
-- [Share this](#share-this)
+`Go 1.24+ · Python 3 demo` · [Apache-2.0](LICENSE) · [GitHub](https://github.com/SuperMarioYL/agentq) · [网站](https://agentq.lei6393.com)
 
 ## 为什么需要它
 
-你在 tmux 里同时开了 4 个 Claude Code 会话，每个都会停下来问"允许这条 bash 吗？""可以改这个文件吗？"——但你不知道**当前哪一个**在等你。alt-tab 一圈才找到要回答的那个，写代码的时间被切碎成了"找窗口 → 点 Yes → 找下一个窗口"的循环。社区里这叫 **George Jetson 时刻**——见 [r/LocalLLaMA 上的原帖](https://www.reddit.com/r/LocalLLaMA/comments/1tuth0k/)，以及 [affaan-m/everything-claude-code](https://github.com/affaan-m/everything-claude-code) 里围绕多 Claude Code 会话整理的工作流。
+同时运行多个会话时，审批请求会散落在不同终端。agentq 用带会话标识的 ApprovalEnvelope 把问题汇到同一处，保留选项与上下文，再把答复交回原请求方。你仍然决定每条请求是否应当通过。
 
-agentq 把这件事翻转过来：审批不再绑死在终端窗口里，而是聚拢成手机上的一个**有序队列**。哪个 Agent 在等你，扫一眼就知道；按一下就放它过去。
+<picture>
+  <source media="(max-width: 640px) and (prefers-color-scheme: dark)" srcset="assets/presentation/process-mobile-dark.svg">
+  <source media="(max-width: 640px)" srcset="assets/presentation/process-mobile-light.svg">
+  <source media="(prefers-color-scheme: dark)" srcset="assets/presentation/process-dark.svg">
+  <img src="assets/presentation/process-light.svg" width="960" alt="A local approval round trip">
+</picture>
 
-## 10 秒上手
+## 架构
+
+wrap 识别子进程的提示并生成 ApprovalEnvelope。使用 --daemon 时，它通过本地 HTTP 转发请求；serve 将信封与答复保存到 bbolt，通过 REST 和 WebSocket 提供队列，内嵌网页用于处理请求。attach 生成访问地址和二维码。默认 wrap 仍可使用 stdin/stdout 协议。
+
+<picture>
+  <source media="(max-width: 640px) and (prefers-color-scheme: dark)" srcset="assets/presentation/architecture-mobile-dark.svg">
+  <source media="(max-width: 640px)" srcset="assets/presentation/architecture-mobile-light.svg">
+  <source media="(prefers-color-scheme: dark)" srcset="assets/presentation/architecture-dark.svg">
+  <img src="assets/presentation/architecture-light.svg" width="960" alt="One queue, explicit reply routes">
+</picture>
+
+## 安装
+
+需要 Go 1.24+；下方自带协议示例还需要 Python 3。构建时可能下载 Go 依赖，示例只访问回环地址。
 
 ```bash
-# 安装（任选其一）
-brew install SuperMarioYL/tap/agentq          # macOS
-go install github.com/SuperMarioYL/agentq@latest
-
-# 终端 A：起守护进程，记下打印的 token
-agentq serve
-
-# 每个 Agent 终端：用 wrap 套住 Agent
-agentq wrap -- claude
-# Cursor / Aider 等用括号式 (Y)es/(N)o 提示的 Agent：
-agentq wrap --agent cursor -- cursor-agent   # --agent 默认 auto，同时识别两种提示
-
-# 桌面终端：打印手机扫码（LAN IP 选错时用 --ip 手动指定）
-agentq attach --token <粘 token>
+git clone https://github.com/SuperMarioYL/agentq.git
+cd agentq
+go build -o agentq ./cmd/agentq
 ```
 
-扫码、点 Approve、Agent 解锁——首次审批一般在两分钟以内完成。
+## 快速开始
 
-## <img src="https://api.iconify.design/tabler:photo.svg?color=%230071E3&width=24" height="22" align="absmiddle" alt=""> 演示
+```bash
+python3 examples/presentation_demo.py
+```
 
-![demo](assets/demo.gif)
+脚本在临时目录构建并启动真实 daemon，提交一个构造审批请求，再通过 HTTP 选择 n。输出显示队列从 0 变成包含 demo-approval，答复返回原请求，随后队列回到 0。它不启动编码 Agent，不执行审批文字中的动作。
 
-> 动图由 CI（[`.github/workflows/demo.yml`](./.github/workflows/demo.yml)）用 [vhs](https://github.com/charmbracelet/vhs) 渲染脚本 [docs/demo.tape](./docs/demo.tape) 自动产出。
+## 用法
 
-## <img src="https://api.iconify.design/tabler:topology-star-3.svg?color=%230071E3&width=24" height="22" align="absmiddle" alt=""> 架构
+```bash
+# 自动启动或复用本地 daemon，并转发审批
+./agentq wrap --daemon -- claude
 
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="./assets/atlas-dark.svg">
-    <source media="(prefers-color-scheme: light)" srcset="./assets/atlas-light.svg">
-    <img src="./assets/atlas-light.svg" width="880" alt="N 个 Claude Code 会话各被 agentq wrap 套住，通过 stdio 把 ApprovalEnvelope 上报给本地 agentq serve 守护进程（bbolt 存储，127.0.0.1:7777 上的 HTTP + WebSocket）；agentq attach 打印二维码，手机端网页 UI 排空队列并把答复回传">
-  </picture>
-</p>
+# 显式启动手机可访问的本地网络服务
+./agentq serve --lan --token-out ./agentq-token.txt
+./agentq attach --token-file ./agentq-token.txt
 
-每个 Claude Code 会话被 `agentq wrap`（很薄的 pty + stdio 嗅探器）套住，识别审批提示后以 `ApprovalEnvelope` JSON 上报给本地的 `agentq serve` 守护进程。守护进程把信封按 ULID 顺序排成一个一次只放一个的队列，用 bbolt 持久化，并在 `127.0.0.1:7777` 上同时提供 HTTP、WebSocket 与内嵌 SPA。`agentq attach` 算出本机 LAN IP 打印二维码，手机扫码后即可排空队列，每条答复沿 WebSocket 回传解锁对应的 Agent——全程在你自己的机器上，没有 Docker、没有 SaaS、没有外部数据库。
+# 选择 Cursor/Aider 风格的提示匹配器
+./agentq wrap --daemon --agent cursor -- cursor-agent
+```
 
-三个进程都跑在你自己的机器上：
-- `agentq wrap`：很薄的 pty + stdio 嗅探器，识别 Agent 的审批提示，按 `ApprovalEnvelope` JSON 上报；
-- `agentq serve`：单文件 Go 二进制，绑定 `127.0.0.1:7777`，提供 HTTP + WebSocket + 内嵌 SPA；
-- `agentq attach`：算出本机 LAN IP，把 `http://<ip>:7777/?t=<token>` 编成终端二维码。
+第三方命令需自行安装。手机与主机应处于可连通的网络；默认 serve 绑定 127.0.0.1，只有二维码不能把回环服务变成 LAN 服务。
 
-没有 Docker、没有 SaaS、没有外部数据库。
+## 能力与集成
 
-## HTTP / WebSocket API
+| 路由 | 行为 |
+|---|---|
+| POST /api/envelopes | 提交请求并等待答复或过期 |
+| GET /api/queue | 读取当前未答复队列 |
+| POST /api/queue/:id/answer | 提交 choice_key |
+| /ws | 订阅队列和答复事件 |
+| GET /schema/approval-envelope.json | 获取公开协议 schema |
+| GET /healthz | 存活检查 |
 
-| 路由 | 方法 | 作用 |
-| ---- | ---- | ---- |
-| `/api/envelopes` | POST | 发送 `ApprovalEnvelope`，长连接阻塞直到拿到答复（或 TTL 到期） |
-| `/api/queue` | GET | 列出当前未答复的 envelope，按 ULID 升序 |
-| `/api/queue/:id/answer` | POST | 提交 `{ "choice_key": "y" }` |
-| `/ws` | WebSocket | 推送 `{kind:"envelope"}` / `{kind:"answer"}` 事件，初次连接会推送当前快照 |
-| `/schema/approval-envelope.json` | GET | 无需 token，返回 `ApprovalEnvelope` 的 JSON Schema（协议契约） |
-| `/healthz` | GET | 无需 token 的存活检查 |
+/api 与 /ws 接受 bearer token 或 ?t=token。协议可以由自定义运行时直接调用，不要求使用 stdout 提示识别器。
 
-所有 `/api` 和 `/ws` 都要求 `?t=<token>` 或 `Authorization: Bearer <token>`。
+<picture>
+  <source media="(max-width: 640px) and (prefers-color-scheme: dark)" srcset="assets/presentation/integrations-mobile-dark.svg">
+  <source media="(max-width: 640px)" srcset="assets/presentation/integrations-mobile-light.svg">
+  <source media="(prefers-color-scheme: dark)" srcset="assets/presentation/integrations-dark.svg">
+  <img src="assets/presentation/integrations-light.svg" width="960" alt="Prompt and protocol integration">
+</picture>
 
-`ApprovalEnvelope` 的字段在 [internal/protocol/approval.go](./internal/protocol/approval.go) 里定义，并以 JSON Schema 形式发布在 [docs/approval-envelope.schema.json](./docs/approval-envelope.schema.json)，运行中的守护进程也会在 `GET /schema/approval-envelope.json` 上无鉴权返回同一份契约。公开这份协议是 agentq 的护城河——任何 Agent 运行时都能对着 schema 校验自己的输出，然后直接 `POST /api/envelopes` 把信封发进队列，完全不需要 `agentq wrap` 拦截 stdio。
+## 配置与边界
 
-## 配置
+| serve 参数 | 默认/用途 |
+|---|---|
+| --listen | 127.0.0.1:7777 |
+| --lan | 显式改为监听所有接口 |
+| --data-dir | XDG_DATA_HOME/agentq 或 ~/.agentq |
+| --token | 不指定时生成 |
+| --token-out | 将当前 token 写入文件 |
+| --auto-approve | 可重复的 glob:choice 规则 |
+| --auto-approve-file | 每行一条规则 |
 
-| 字段 | 类型 | 默认值 | 含义 |
-| ---- | ---- | ------ | ---- |
-| `--listen` | host:port | `127.0.0.1:7777` | 守护进程监听地址 |
-| `--lan` | bool | `false` | 把 `--listen` 改成 `0.0.0.0:<port>`，让手机能进来 |
-| `--data-dir` | path | `$XDG_DATA_HOME/agentq` 或 `~/.agentq` | bbolt 文件所在目录 |
-| `--token` | string | 自动生成 | 客户端必须带的 bearer token |
-| `--token-out` | path | 不写 | 把 token 写到文件，`attach` 可用 `--token-file` 读 |
+自动批准默认关闭。规则按顺序匹配完整提示，* 可以跨越 /；第一条匹配且 choice 存在于当前选项时生效，否则进入人工队列。它是文本匹配，不是命令安全分析。wrap 的 --expiry 控制请求有效期；提示识别依赖相应输出格式，未知交互并不保证被捕获。
 
-`agentq wrap` 沿用 m1 已实现的 stdout/stdin 协议，可以通过外部桥脚本把每行 envelope POST 给守护进程；自 v0.4 起也可直接 `agentq wrap --daemon -- <agent>`，由 wrap 自动拉起（或复用）本地 `serve` 守护进程，一条命令搞定。
+## 运行记录
 
-## 对比 affaan-m/everything-claude-code
+v0.11.0 的真实本地 HTTP 往返。输出由示例从实际响应提取稳定字段，不包含动态时间戳；这不是手机、LAN 或第三方 Agent 兼容性验收。
 
-[affaan-m/everything-claude-code](https://github.com/affaan-m/everything-claude-code) 是一份围绕 Claude Code 工作流的精选清单，定位是"资源整理"；agentq 解决的是清单里至今缺席的**多会话审批收敛**问题。两者并不冲突——把 agentq 放到清单里反而是好事。
+[输入、命令和完整输出](docs/demo-results.json)
 
-| 维度 | agentq | everything-claude-code |
-| ---- | ------ | ---------------------- |
-| 多会话审批收敛 N→1 | ✓ | — |
-| `ApprovalEnvelope` 开放协议 | ✓ | — |
-| 工作流资源精选 | — | ✓ |
-| 单二进制工具 | ✓ | — |
-| 适用于多 Agent 并行 | ✓ | partial |
+[保留的历史终端录屏](assets/demo.gif) · [录制脚本](docs/demo.tape)。本轮示例以以上可重放记录为准。
 
 ## 路线图
 
-- [x] m1：wrap 单 Agent，stdout/stdin 驱动
-- [x] m2：N 个 wrap → 一个 daemon，bbolt 持久化，REST + WS
-- [x] m3：手机端响应式 SPA + 终端二维码
-- [x] v0.2：Cursor / Aider 适配器（`agentq wrap --agent cursor`）；修复审批竞态丢失、ULID 非单调乱序、attach 选错 LAN IP 三个缺陷
-- [x] v0.3：公开 `ApprovalEnvelope` JSON Schema（`GET /schema/approval-envelope.json`）；修复重复答复覆盖审计记录、CursorMatcher 同首字母选项 key 冲突两个缺陷
-- [x] v0.4：Windows 支持（构建标签拆分 pty/管道两条子进程路径）；`agentq wrap --daemon` 一键拉起/复用守护进程；修复已答复卡片不广播、wrap 答复读取无法取消、过期 envelope 滞留队列、回填时通知风暴四个缺陷
-- [ ] v0.5：`Team` 模式（共享队列 + 审计日志），按需付费
+- [x] stdio 信封/答复协议和提示匹配器。
+- [x] daemon、bbolt、REST、WebSocket 和网页队列。
+- [x] wrap --daemon、二维码和显式 LAN 监听。
+- [x] 可选自动批准规则。
+- [ ] 更完整的团队协作与审计体验。
 
-## 协议与贡献
+已发布修复记录见 CHANGELOG.md；第三方 Agent 的具体版本仍需实际接入验证。
 
-Apache 2.0。问题、想法、协议讨论一律走 [Issues](https://github.com/SuperMarioYL/agentq/issues)；想加新 Agent 适配器就直接发 PR，`ApprovalEnvelope` 一旦公开就是大家的协议。
-
-推送仓库后建议加 topic：
+## 开发与许可证
 
 ```bash
-gh repo edit --add-topic claude-code --add-topic agent --add-topic mcp
+go test ./...
+go build ./cmd/agentq
 ```
 
-## Share this
+协议定义见 [approval.go](internal/protocol/approval.go) 和 [JSON Schema](docs/approval-envelope.schema.json)。
 
-```
-agentq —— 把 N 个并行 Claude Code 会话的审批塞进一个手机队列。开源、单二进制、30 秒上手。Agent 多了 alt-tab 找不到哪个在等你？扫码就行。 https://github.com/SuperMarioYL/agentq
-```
+[Apache-2.0](LICENSE) · [Issues](https://github.com/SuperMarioYL/agentq/issues)

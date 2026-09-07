@@ -1,149 +1,131 @@
-# agentq
+[简体中文](README.md) | **English**
 
-**English** | [简体中文](./README.md)
+<picture>
+  <source media="(max-width: 640px) and (prefers-color-scheme: dark)" srcset="assets/presentation/hero-mobile-dark.svg">
+  <source media="(max-width: 640px)" srcset="assets/presentation/hero-mobile-light.svg">
+  <source media="(prefers-color-scheme: dark)" srcset="assets/presentation/hero-dark.svg">
+  <img src="assets/presentation/hero-light.svg" width="960" alt="agentq — Bring scattered approvals into one queue.">
+</picture>
 
-<p align="center">
-  <img src="https://readme-typing-svg.demolab.com?font=JetBrains+Mono&size=22&duration=2800&pause=900&color=6EA8FF&center=true&vCenter=true&width=720&lines=N+Claude+Code+sessions+%E2%86%92+one+phone+queue;Open+source+%C2%B7+single+binary+%C2%B7+local+LAN" alt="agentq" />
-</p>
+**agentq collects coding-agent approval requests in a local browser queue and returns each choice to the waiting session.**
 
-<p align="center">
-  <a href="./LICENSE"><img alt="Apache License 2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square"></a>
-  <a href="https://go.dev/"><img alt="Go 1.24" src="https://img.shields.io/badge/go-1.24-00ADD8?style=flat-square&logo=go&logoColor=white"></a>
-  <a href="https://github.com/SuperMarioYL/agentq/releases"><img alt="status" src="https://img.shields.io/badge/release-v0.6.0-51d1a3?style=flat-square"></a>
-  <a href="#"><img alt="Claude Code" src="https://img.shields.io/badge/Claude%20Code-ready-7c5cff?style=flat-square"></a>
-  <a href="#"><img alt="Coding Agent" src="https://img.shields.io/badge/Coding%20Agent-N%3A1-51d1a3?style=flat-square"></a>
-</p>
+`Go 1.24+ · Python 3 demo` · [Apache-2.0](LICENSE) · [GitHub](https://github.com/SuperMarioYL/agentq) · [Website](https://agentq.lei6393.com)
 
-> **agentq is the triage queue that fans approval prompts from N parallel Claude Code sessions into one phone.**
+## Why it helps
 
-## Table of contents
+Parallel sessions can leave approval prompts scattered across terminals. agentq collects ApprovalEnvelopes with session labels, choices and context, then returns the answer to the original requester. You still decide which requests to approve.
 
-- [Why this exists](#why-this-exists)
-- [10-second quickstart](#10-second-quickstart)
-- [Demo](#demo)
-- [Architecture](#architecture)
-- [HTTP / WebSocket API](#http--websocket-api)
-- [Configuration](#configuration)
-- [vs ChromeDevTools/chrome-devtools-mcp](#vs-chromedevtoolschrome-devtools-mcp)
-- [Roadmap](#roadmap)
-- [License & contributing](#license--contributing)
-- [Share this](#share-this)
+<picture>
+  <source media="(max-width: 640px) and (prefers-color-scheme: dark)" srcset="assets/presentation/process-mobile-dark.svg">
+  <source media="(max-width: 640px)" srcset="assets/presentation/process-mobile-light.svg">
+  <source media="(prefers-color-scheme: dark)" srcset="assets/presentation/process-dark.svg">
+  <img src="assets/presentation/process-light.svg" width="960" alt="A local approval round trip">
+</picture>
 
-## Why this exists
+## Architecture
 
-You're running four Claude Code sessions across four tmux panes. Each one stops to ask "allow this bash command?" or "edit this file?" — and you have no way to know **which one** is currently waiting. alt-tabbing the fleet to find the right window has quietly become more of your job than writing code. The Reddit framing for this is the [George Jetson moment](https://www.reddit.com/r/LocalLLaMA/comments/1tuth0k/) — supervision-without-knowing-who-needs-you. The shape of multi-agent dev workflows is already in [affaan-m/everything-claude-code](https://github.com/affaan-m/everything-claude-code), and the obvious gap on that list is a Coding Agent fan-in: a single queue you drain instead of a set of windows you patrol.
+wrap recognizes child-process prompts and produces ApprovalEnvelopes. With --daemon it forwards requests over local HTTP. serve persists envelopes and answers in bbolt and exposes the queue through REST, WebSocket and an embedded page. attach generates an access URL and QR code. Plain wrap also supports the stdin/stdout protocol.
 
-agentq is exactly that fan-in. Wrap each Coding Agent session, point your phone at the daemon, and approvals arrive in one queue — agent-tagged, ordered, ignorable from the right device.
+<picture>
+  <source media="(max-width: 640px) and (prefers-color-scheme: dark)" srcset="assets/presentation/architecture-mobile-dark.svg">
+  <source media="(max-width: 640px)" srcset="assets/presentation/architecture-mobile-light.svg">
+  <source media="(prefers-color-scheme: dark)" srcset="assets/presentation/architecture-dark.svg">
+  <img src="assets/presentation/architecture-light.svg" width="960" alt="One queue, explicit reply routes">
+</picture>
 
-## 10-second quickstart
+## Install
+
+Requires Go 1.24+ and Python 3 for the supplied protocol demo. Building may download Go dependencies; the demo only contacts loopback.
 
 ```bash
-# Install (pick one)
-brew install SuperMarioYL/tap/agentq          # macOS
-go install github.com/SuperMarioYL/agentq@latest
-
-# Terminal A: start the daemon, copy the token it prints
-agentq serve
-
-# Each agent terminal: wrap the agent
-agentq wrap -- claude
-# For Cursor / Aider and other (Y)es/(N)o-style prompts:
-agentq wrap --agent cursor -- cursor-agent   # --agent defaults to auto (both dialects)
-
-# Desktop terminal: print a QR for your phone (use --ip if the auto-picked LAN IP is wrong)
-agentq attach --token <paste token>
+git clone https://github.com/SuperMarioYL/agentq.git
+cd agentq
+go build -o agentq ./cmd/agentq
 ```
 
-Scan the QR, tap Approve, the wrapped agent unblocks. First approval in well under two minutes on a fresh box.
+## Quickstart
 
-## <img src="https://api.iconify.design/tabler:photo.svg?color=%230071E3&width=24" height="22" align="absmiddle" alt=""> Demo
+```bash
+python3 examples/presentation_demo.py
+```
 
-![demo](assets/demo.gif)
+The script builds and starts the real daemon in a temporary directory, submits one constructed approval and answers n over HTTP. The queue moves from zero to demo-approval, the answer returns to the requester, and the queue returns to zero. It launches no coding agent and executes no action described in the prompt.
 
-> The gif is rendered automatically by CI ([`.github/workflows/demo.yml`](./.github/workflows/demo.yml)) running [vhs](https://github.com/charmbracelet/vhs) on the script in [docs/demo.tape](./docs/demo.tape).
+## Usage
 
-## <img src="https://api.iconify.design/tabler:topology-star-3.svg?color=%230071E3&width=24" height="22" align="absmiddle" alt=""> Architecture
+```bash
+# Start or reuse the local daemon and forward approvals
+./agentq wrap --daemon -- claude
 
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="./assets/atlas-dark.svg">
-    <source media="(prefers-color-scheme: light)" srcset="./assets/atlas-light.svg">
-    <img src="./assets/atlas-light.svg" width="880" alt="N Claude Code sessions each wrapped by agentq wrap emit ApprovalEnvelopes over stdio into the local agentq serve daemon (bbolt store, HTTP + WebSocket on 127.0.0.1:7777); agentq attach prints a QR so the phone web UI drains the queue and sends answers back">
-  </picture>
-</p>
+# Explicitly expose the queue on your local network
+./agentq serve --lan --token-out ./agentq-token.txt
+./agentq attach --token-file ./agentq-token.txt
 
-Each Claude Code session is wrapped by `agentq wrap` — a thin pty + stdio sniffer that detects approval prompts and emits them as `ApprovalEnvelope` JSON to the local `agentq serve` daemon. The daemon orders envelopes by ULID into a one-at-a-time queue, persists them in bbolt, and serves HTTP, WebSocket, and the embedded SPA on `127.0.0.1:7777`. `agentq attach` resolves your LAN IP and prints a QR; scan it from your phone to drain the queue, and every answer streams back over WebSocket to unblock the matching agent — all on your own machine, with no Docker, no SaaS, and no external database.
+# Select the Cursor/Aider prompt matcher
+./agentq wrap --daemon --agent cursor -- cursor-agent
+```
 
-All three processes run on your own machine:
-- `agentq wrap` is a thin pty + stdio sniffer that detects approval prompts and emits `ApprovalEnvelope` JSON;
-- `agentq serve` is a single static Go binary that binds `127.0.0.1:7777` and serves HTTP + WebSocket + the embedded SPA;
-- `agentq attach` resolves your LAN IP and renders an ASCII QR encoding `http://<ip>:7777/?t=<token>`.
+Install third-party commands separately. The phone must be able to reach the host. serve binds to 127.0.0.1 by default; generating a QR code does not make a loopback listener reachable over LAN.
 
-No Docker, no SaaS, no external database.
+## Capabilities and integrations
 
-## HTTP / WebSocket API
+| Route | Behavior |
+|---|---|
+| POST /api/envelopes | Submit and wait for an answer or expiry |
+| GET /api/queue | Read pending requests |
+| POST /api/queue/:id/answer | Submit choice_key |
+| /ws | Subscribe to queue and answer events |
+| GET /schema/approval-envelope.json | Fetch the public protocol schema |
+| GET /healthz | Check liveness |
 
-| Route | Method | Purpose |
-| ----- | ------ | ------- |
-| `/api/envelopes` | POST | Submit an `ApprovalEnvelope`; long-poll until answered (or TTL expires) |
-| `/api/queue` | GET | List unanswered envelopes, ULID-ordered |
-| `/api/queue/:id/answer` | POST | Submit `{ "choice_key": "y" }` |
-| `/ws` | WebSocket | Streams `{kind:"envelope"}` / `{kind:"answer"}` events; pushes initial snapshot on connect |
-| `/schema/approval-envelope.json` | GET | Token-free; returns the `ApprovalEnvelope` JSON Schema (the protocol contract) |
-| `/healthz` | GET | Token-free liveness probe |
+/api and /ws accept a bearer token or ?t=token. Custom runtimes can call the protocol directly instead of using prompt recognition.
 
-Everything under `/api` and `/ws` requires `?t=<token>` or `Authorization: Bearer <token>`.
+<picture>
+  <source media="(max-width: 640px) and (prefers-color-scheme: dark)" srcset="assets/presentation/integrations-mobile-dark.svg">
+  <source media="(max-width: 640px)" srcset="assets/presentation/integrations-mobile-light.svg">
+  <source media="(prefers-color-scheme: dark)" srcset="assets/presentation/integrations-dark.svg">
+  <img src="assets/presentation/integrations-light.svg" width="960" alt="Prompt and protocol integration">
+</picture>
 
-`ApprovalEnvelope` is defined in [internal/protocol/approval.go](./internal/protocol/approval.go) and published as a JSON Schema at [docs/approval-envelope.schema.json](./docs/approval-envelope.schema.json); the running daemon serves the same contract token-free at `GET /schema/approval-envelope.json`. Making this shape public is the moat: any agent runtime can validate its output against the schema and `POST /api/envelopes` conforming envelopes straight into the queue — no `agentq wrap` stdio scraping required.
+## Configuration and limits
 
-## Configuration
+| serve option | Default/purpose |
+|---|---|
+| --listen | 127.0.0.1:7777 |
+| --lan | Explicitly listen on all interfaces |
+| --data-dir | XDG_DATA_HOME/agentq or ~/.agentq |
+| --token | Generated when omitted |
+| --token-out | Write the active token to a file |
+| --auto-approve | Repeatable glob:choice rules |
+| --auto-approve-file | One rule per line |
 
-| Flag | Type | Default | Meaning |
-| ---- | ---- | ------- | ------- |
-| `--listen` | host:port | `127.0.0.1:7777` | Daemon bind address |
-| `--lan` | bool | `false` | Shorthand to rewrite `--listen` to `0.0.0.0:<port>` so phones can reach it |
-| `--data-dir` | path | `$XDG_DATA_HOME/agentq` or `~/.agentq` | Where the bbolt store lives |
-| `--token` | string | auto-generated | Bearer token clients must present |
-| `--token-out` | path | unset | Optional file to write the active token to (consumed by `attach --token-file`) |
+Automatic approval is off by default. Rules match the whole prompt in order; * spans /. The first match applies only if its choice exists in the current envelope, otherwise human triage remains. This is text matching, not command-safety analysis. wrap --expiry controls validity; prompt recognition depends on the selected output format and cannot guarantee capture of unknown interactions.
 
-`agentq wrap` keeps the m1 stdout/stdin contract from m1 — a tiny bridge script can `POST` each envelope line to the daemon. As of v0.4 you can also run `agentq wrap --daemon -- <agent>`, which starts (or reuses) the local `serve` daemon and forwards prompts to it in a single command.
+## Recorded demo
 
-## vs ChromeDevTools/chrome-devtools-mcp
+A real local HTTP round trip on v0.11.0. The example extracts stable fields from actual responses, omitting dynamic timestamps. It is not phone, LAN or third-party agent compatibility acceptance.
 
-[ChromeDevTools/chrome-devtools-mcp](https://github.com/ChromeDevTools/chrome-devtools-mcp) is in the same neighborhood — an MCP-style bridge that gives Coding Agents a structured surface to drive a separate tool. agentq makes the same kind of bridge in the other direction: it gives the human a structured surface to drive N agents.
+[Inputs, commands and complete output](docs/demo-results.json)
 
-| Axis | agentq | chrome-devtools-mcp |
-| ---- | ------ | ------------------- |
-| Bridges N coding-agent sessions → 1 human | ✓ | — |
-| Bridges 1 agent → 1 browser DevTools surface | — | ✓ |
-| Open envelope/protocol on the agent side | ✓ | partial |
-| Single binary, no Node runtime | ✓ | — |
-| Phone-first triage UI | ✓ | — |
-
-Different ends of the same plumbing — both worth running.
+[Retained terminal recording](assets/demo.gif) · [Recording script](docs/demo.tape). The replayable record above describes this example.
 
 ## Roadmap
 
-- [x] m1: wrap one agent, stdout/stdin driven
-- [x] m2: N wrappers → one daemon, bbolt-backed, REST + WS
-- [x] m3: phone-first responsive SPA + terminal QR
-- [x] v0.2: Cursor / Aider adapter (`agentq wrap --agent cursor`); fixes for the lost-approval race, non-monotonic ULID ordering, and attach picking an unreachable LAN IP
-- [x] v0.3: publish the `ApprovalEnvelope` JSON Schema (`GET /schema/approval-envelope.json`); fixes for a second/racing answer overwriting the audit record and for CursorMatcher minting duplicate choice keys on same-first-letter options
-- [x] v0.4: Windows support (build-tagged pty/pipe child-process split); first-class `agentq wrap --daemon`; fixes for answered cards not broadcasting, the wrap answer read not being cancellable, expired envelopes lingering in the queue, and the notification storm on backlog reload
-- [ ] v0.5: `Team` mode — shared queue across an eng squad + audit log (paid tier candidate)
+- [x] stdio envelopes/answers and prompt matchers.
+- [x] Daemon, bbolt, REST, WebSocket and browser queue.
+- [x] wrap --daemon, QR access and explicit LAN binding.
+- [x] Optional automatic-approval rules.
+- [ ] Expanded team collaboration and audit experience.
 
-## License & contributing
+See CHANGELOG.md for shipped fixes. Validate the particular third-party agent version used by your integration.
 
-Apache 2.0. Open an [issue](https://github.com/SuperMarioYL/agentq/issues) for bugs, ideas, or protocol discussion; send a PR if you have an adapter for another Coding Agent — once `ApprovalEnvelope` is public it belongs to everyone.
-
-After you push, set repo topics:
+## Development and license
 
 ```bash
-gh repo edit --add-topic claude-code --add-topic agent --add-topic mcp
+go test ./...
+go build ./cmd/agentq
 ```
 
-## Share this
+See [approval.go](internal/protocol/approval.go) and the [JSON Schema](docs/approval-envelope.schema.json) for the protocol.
 
-```
-agentq — the triage queue that funnels approval prompts from N parallel Claude Code sessions into one phone. Free, OSS, single static Go binary. Stop alt-tabbing your coding agents. https://github.com/SuperMarioYL/agentq
-```
+[Apache-2.0](LICENSE) · [Issues](https://github.com/SuperMarioYL/agentq/issues)
