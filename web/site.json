@@ -225,5 +225,6 @@
       "zh": "Go 1.24+ · Python 3 demo · Apache-2.0",
       "en": "Go 1.24+ · Python 3 demo · Apache-2.0"
     }
-  }
+  },
+  "content_version": "v0.15.0"
 }
