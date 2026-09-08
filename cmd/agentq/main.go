@@ -14,7 +14,9 @@ import (
 )
 
 // version is overridden at build time via -ldflags "-X main.version=...".
-var version = "0.11.0"
+// The default here must stay in lockstep with the VERSION file and web/site.json
+// content_version; version_consistency_test.go enforces all three agree.
+var version = "0.16.0"
 
 func main() {
 	root := newRootCmd()

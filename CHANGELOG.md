@@ -6,6 +6,99 @@ project loosely follows [SemVer](https://semver.org).
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-09-08
+
+Release-traceability release. One fix that reconciles every version surface
+with the shipped tag and adds a regression test so the drift cannot silently
+recur. No behavior, wire format, or HTTP API change.
+
+### Fixed
+
+- **Every version surface now agrees with the shipped tag.** At the v0.15.0
+  tag `VERSION` read `0.11.0`, `cmd/agentq/main.go`'s `var version` (the
+  default `go build` bakes in without goreleaser ldflags) was `0.11.0`,
+  `web/site.json`'s `content_version` was `v0.14.0`, and the CHANGELOG's
+  top entry was `[0.11.0]` with no `[0.12.0]`–`[0.15.0]` entries at all — so
+  a user running `agentq --version` on a binary built from the shipped tag, or
+  reading the published `site.json`, could not tell which release they were
+  on, and the CHANGELOG could not account for four consecutive releases.
+  `VERSION`, `cmd/agentq/main.go`'s `var version`, and `web/site.json`'s
+  `content_version` (plus the schema-3 `meta.implementation_version`) are
+  bumped to `0.16.0` in lockstep, and the missing `[0.12.0]`–`[0.15.0]`
+  entries are backfilled so the log runs `0.1.0` → `0.16.0` with no gaps.
+
+### Added
+
+- **A single-source-of-truth version-consistency test.**
+  `version_consistency_test.go` (package `agentq`) reads `VERSION` as the
+  authoritative version and asserts that `cmd/agentq/main.go`'s
+  `var version`, `web/site.json`'s `content_version` (`"v"+VERSION`),
+  `web/site.json`'s `meta.implementation_version` (when present), and a
+  `CHANGELOG.md` `## [VERSION]` entry all agree with it. It fails the build
+  the moment any surface drifts, so a future bump that touches only one
+  surface cannot ship.
+
+## [0.15.0] - 2026-08-29
+
+Quiet correctness release. One help-text clarification on the auto-approve
+flag and one frontend fix that drops a dead card instead of leaving it
+stuck; the wire format and HTTP API are unchanged.
+
+### Fixed
+
+- **The `--auto-approve` glob help text now states `*` matches `/`.**
+  `internal/cli/serve.go`'s flag help described the glob as a `path.Match`
+  shell glob, which a reader would assume refuses to cross `/` — but
+  `internal/daemon/autoapprove.go`'s `globMatch` treats `*` as any run of
+  bytes including `/` (free-text prompts are not paths). The help string now
+  says so explicitly.
+- **A phone answering an already-dead card no longer leaves a stuck card.**
+  `web/app.js`'s answer `fetch` treated a 409 (already answered by another
+  phone) or 410 (expired) response as a retryable error, re-enabling the
+  buttons and leaving a dead card on screen — the server's best-effort
+  removal broadcast can drop on a slow subscriber. A 409/410 is now treated
+  as terminal: the card is removed locally via `removeCard`.
+
+## [0.14.0] - 2026-08-22
+
+Quiet posture release. Site refresh only (`web/site.json`); no code, wire
+format, or HTTP API change.
+
+## [0.13.0] - 2026-08-18
+
+Feature + hardening release. Auto-approve rules let trusted-command prompts
+skip the phone queue, and `attach` rejects an empty token. The
+`ApprovalEnvelope` wire format is unchanged.
+
+### Added
+
+- **Auto-approve rules.** `--auto-approve "<glob>:<choice>"` (repeatable)
+  and `--auto-approve-file` compile an ordered rule set
+  (`internal/daemon/autoapprove.go`) consulted by `Server.postEnvelope`
+  (`internal/daemon/server.go`): a prompt matching a rule is answered with the
+  rule's choice BEFORE entering the phone triage queue, so trusted commands
+  (`make *:y`, `git status:y`) unblock without a phone tap. A rule whose
+  choice is not among the envelope's choices falls through to human triage.
+
+### Fixed
+
+- **`agentq attach` rejects an empty token.** An empty `--token` previously
+  produced a useless QR that could never authenticate; `internal/cli/attach.go`
+  now errors out at startup instead.
+
+## [0.12.0] - 2026-08-15
+
+Correctness release. One wrapper fix that surfaces the real child exit status
+on a mid-prompt agent exit; the wire format is unchanged.
+
+### Fixed
+
+- **A mid-prompt agent exit now surfaces as its exit status, not a broken
+  pipe.** When a wrapped agent exited while a prompt was in flight, the
+  wrapper reported a broken-pipe error instead of the agent's real exit
+  status. The wrapper now surfaces the child's exit status
+  (`internal/wrapper`).
+
 ## [0.11.0] - 2026-08-11
 
 Quiet correctness release. One fix on the phone triage surface; the wire format
