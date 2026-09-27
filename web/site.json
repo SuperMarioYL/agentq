@@ -75,6 +75,16 @@
         "zh": "自定义运行时可以提交 HTTP 信封，不必模拟某个终端提示。",
         "en": "Custom runtimes can submit HTTP envelopes without imitating a terminal prompt."
       }
+    },
+    {
+      "title": {
+        "zh": "连不上就明说",
+        "en": "Say so when unreachable"
+      },
+      "body": {
+        "zh": "attach 打印二维码前先探测守护进程 /healthz，不可达时直接在终端警告原因（未启动、只绑定回环、IP 不对），不再给一张静默打不开的码；超长输出也不再中断被包裹的会话。",
+        "en": "attach probes the daemon's /healthz before printing the QR and warns loudly when nothing answers (not running, loopback-only bind, wrong IP) — no more silently dead codes; oversized agent output no longer aborts the wrapped session either."
+      }
     }
   ],
   "story": {
