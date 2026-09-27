@@ -4,9 +4,11 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/mdp/qrterminal/v3"
 	"github.com/spf13/cobra"
@@ -19,6 +21,12 @@ type AttachOptions struct {
 	Token     string
 	Port      int
 	IP        string // explicit LAN IP override; skips auto-detection
+
+	// Probe is the injectable daemon health check RunAttach runs against the
+	// resolved target BEFORE printing the QR (m_attach_preflight). Nil means
+	// the real HTTP probe (probeDaemonHealth); tests inject a stub so no
+	// network is touched.
+	Probe func(target string) error
 }
 
 // NewAttachCmd builds the `attach` subcommand.
@@ -69,6 +77,22 @@ func RunAttach(opts AttachOptions, stdout, stderr io.Writer) error {
 	target, err := resolveDaemonURL(opts, token)
 	if err != nil {
 		return err
+	}
+	// Preflight (m_attach_preflight): probe the resolved target BEFORE
+	// printing, so the remaining silent-dead-QR causes — daemon not running,
+	// daemon bound to loopback (the QR cannot turn a loopback service into a
+	// LAN service), or a wrong --ip/--daemon-url — surface as a loud warning
+	// instead of a QR that scans fine and never loads on the phone. A
+	// WARNING, not an error: the phone may still reach the daemon by a path
+	// this host cannot (firewalled host, split subnets), so the QR prints
+	// regardless. The v0.13 empty-token guard above stays the hard error.
+	probe := opts.Probe
+	if probe == nil {
+		probe = probeDaemonHealth
+	}
+	if perr := probe(target); perr != nil {
+		fmt.Fprintf(stderr, "attach: WARNING: nothing answered the health check at %s (%v)\n", originURL(target), perr)
+		fmt.Fprintln(stderr, "attach: the QR below may not load from your phone. Check that `agentq serve` is running, start it with --lan so phones can reach it, or pass --ip/--daemon-url to override the advertised address.")
 	}
 	fmt.Fprintln(stdout, "scan this with your phone (same Wi-Fi as this machine):")
 	fmt.Fprintln(stdout, "  "+target)
@@ -228,4 +252,43 @@ func pickV4(a net.Addr) net.IP {
 		}
 	}
 	return nil
+}
+
+// attachProbeTimeout bounds the attach health preflight so `attach` never
+// hangs on a black-holed address.
+const attachProbeTimeout = 1500 * time.Millisecond
+
+// probeDaemonHealth is the real attach preflight: it GETs /healthz at the
+// resolved target and reports whether the daemon answered 2xx within
+// attachProbeTimeout. The query string (which carries the bearer token) is
+// stripped — /healthz is unauthenticated and the warning lines must not echo
+// the token a second time.
+func probeDaemonHealth(target string) error {
+	u, err := url.Parse(target)
+	if err != nil {
+		return err
+	}
+	u.Path = "/healthz"
+	u.RawQuery = ""
+	client := &http.Client{Timeout: attachProbeTimeout}
+	resp, err := client.Get(u.String())
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("health check status %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// originURL renders target without its query string for the warning lines, so
+// the bearer token is not echoed twice (stdout already prints the full target
+// next to the QR).
+func originURL(target string) string {
+	if u, err := url.Parse(target); err == nil && u.Host != "" {
+		return u.Scheme + "://" + u.Host
+	}
+	return target
 }

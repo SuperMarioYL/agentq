@@ -2,7 +2,10 @@ package cli
 
 import (
 	"bytes"
+	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -144,15 +147,94 @@ func TestRunAttach_RejectsEmptyToken(t *testing.T) {
 }
 
 // TestRunAttach_AcceptsNonEmptyToken confirms the empty-token guard does not
-// fire for a real (trimmed-non-empty) token: the QR is printed as before.
+// fire for a real (trimmed-non-empty) token: the QR is printed as before. The
+// health preflight (m_attach_preflight) is stubbed so the test never touches
+// the network; the warning path is covered separately below.
 func TestRunAttach_AcceptsNonEmptyToken(t *testing.T) {
 	t.Setenv("AGENTQ_TOKEN", "")
 	var out, errOut bytes.Buffer
-	err := RunAttach(AttachOptions{Token: "  realtoken  ", DaemonURL: "http://example.com"}, &out, &errOut)
+	opts := AttachOptions{
+		Token:     "  realtoken  ",
+		DaemonURL: "http://example.com",
+		Probe:     func(string) error { return nil },
+	}
+	err := RunAttach(opts, &out, &errOut)
 	if err != nil {
 		t.Fatalf("RunAttach: %v", err)
 	}
 	if !strings.Contains(out.String(), "http://example.com") {
 		t.Errorf("stdout=%q; want it to contain the daemon URL with the QR", out.String())
+	}
+	if strings.Contains(errOut.String(), "WARNING") {
+		t.Errorf("stderr=%q; want no warning when the health check passes", errOut.String())
+	}
+}
+
+// TestRunAttach_WarnsWhenDaemonUnreachable guards m_attach_preflight: when
+// nothing answers the health check at the resolved target, attach must print
+// a loud stderr warning naming the likely causes (including `serve --lan` for
+// the loopback bind) and STILL print the QR — a warning, not the hard error
+// the empty-token guard raises, because the phone may reach the daemon by a
+// path this host cannot.
+func TestRunAttach_WarnsWhenDaemonUnreachable(t *testing.T) {
+	t.Setenv("AGENTQ_TOKEN", "")
+	var out, errOut bytes.Buffer
+	opts := AttachOptions{
+		Token:     "realtoken",
+		DaemonURL: "http://127.0.0.1:7777",
+		Probe:     func(string) error { return fmt.Errorf("connection refused") },
+	}
+	err := RunAttach(opts, &out, &errOut)
+	if err != nil {
+		t.Fatalf("RunAttach: %v (the preflight is a warning, not an error)", err)
+	}
+	if !strings.Contains(errOut.String(), "WARNING") {
+		t.Errorf("stderr=%q; want the unreachable-daemon warning", errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "--lan") {
+		t.Errorf("stderr=%q; want the warning to name `serve --lan` as a cause", errOut.String())
+	}
+	if !strings.Contains(out.String(), "http://127.0.0.1:7777") {
+		t.Errorf("stdout=%q; want the full target still printed", out.String())
+	}
+	if !strings.Contains(out.String(), "scan this with your phone") {
+		t.Errorf("stdout=%q; want the QR block still printed", out.String())
+	}
+}
+
+// TestProbeDaemonHealth_StripsTokenAndPathsToHealthz checks the real probe
+// helper hits exactly /healthz with no query — the bearer token must not ride
+// along on the preflight request.
+func TestProbeDaemonHealth_StripsTokenAndPathsToHealthz(t *testing.T) {
+	var seenPath, seenRawQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenPath = r.URL.Path
+		seenRawQuery = r.URL.RawQuery
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	target := srv.URL + "/?t=secrettoken"
+	if err := probeDaemonHealth(target); err != nil {
+		t.Fatalf("probeDaemonHealth: %v", err)
+	}
+	if seenPath != "/healthz" {
+		t.Errorf("probe hit %q; want /healthz", seenPath)
+	}
+	if seenRawQuery != "" {
+		t.Errorf("probe carried query %q; want the bearer token stripped", seenRawQuery)
+	}
+}
+
+// TestProbeDaemonHealth_Non2xxIsUnreachable: a 404 from something that is not
+// an agentq daemon must count as "unreachable" so the warning still fires.
+func TestProbeDaemonHealth_Non2xxIsUnreachable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "not the daemon", http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	if err := probeDaemonHealth(srv.URL); err == nil {
+		t.Fatalf("probeDaemonHealth: want an error for a non-2xx /healthz response")
 	}
 }

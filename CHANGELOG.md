@@ -6,6 +6,37 @@ project loosely follows [SemVer](https://semver.org).
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-09-28
+
+Robustness + attach-preflight release. One fix that keeps the wrapped session
+alive through oversized agent output, and one small feature that closes the
+last silent-dead-QR path on the phone-attach surface. No wire-format, HTTP
+API, or store change.
+
+### Fixed
+
+- **A single stdout line over 1 MiB no longer kills the wrapped session.**
+  The IO loop scanned the agent's stdout with a `bufio.Scanner` capped at a
+  1 MiB token, so one longer line — a base64 blob or minified-JSON dump
+  agents routinely echo — made `Scan` return `bufio.ErrTooLong`, `Process`
+  return it, and the whole wrap session die with "token too long" while the
+  triage queue silently lost the agent. The loop now reads lines through a
+  `bufio.Reader` that tolerates arbitrarily long lines: an oversized line is
+  consumed and truncated to 1 MiB for the mirror/matcher/context and the
+  session continues, so a prompt arriving after it is still matched,
+  emitted, and answered. (fix-scanner-oversized-line-kills-session)
+
+### Added
+
+- **`agentq attach` preflight: the QR warns instead of failing silently.**
+  `attach` now probes `GET /healthz` at the resolved target before printing
+  and, when nothing answers, prints a loud stderr warning naming the likely
+  causes (daemon not running, loopback bind — start `serve` with `--lan`, or
+  a wrong `--ip`/`--daemon-url`) while still printing the QR. This closes
+  the remaining silent-dead-QR path after 0.13.0's empty-token fix: the QR
+  previously scanned fine and the page just never loaded, with zero signal
+  to the operator. (m_attach_preflight)
+
 ## [0.16.0] - 2026-09-08
 
 Release-traceability release. One fix that reconciles every version surface

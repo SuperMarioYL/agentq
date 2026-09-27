@@ -938,3 +938,54 @@ func TestWrapperProcess_EmitsValidUTF8ContextForCJK(t *testing.T) {
 		t.Errorf("envelope context begins with U+FFFD; the byte-slice truncation regressed")
 	}
 }
+
+// TestWrapperProcess_OversizedLineDoesNotKillSession guards
+// fix-scanner-oversized-line-kills-session: one stdout line longer than
+// maxLineBytes (the old bufio.Scanner token cap) must be truncated and
+// skipped, not abort the whole wrapped session — the prompt after it is
+// still matched, emitted, and answered.
+func TestWrapperProcess_OversizedLineDoesNotKillSession(t *testing.T) {
+	oversized := strings.Repeat("A", maxLineBytes+4096) + "\n"
+	childOut := strings.NewReader("before\n" + oversized + "Allow this command? [y/N]\n")
+	answers := strings.NewReader(`{"envelope_id":"FIXED-ID-1","choice_key":"y","answered_at":"2026-06-04T10:00:00Z"}` + "\n")
+
+	var envOut, mirror, childIn bytes.Buffer
+	w := &Wrapper{
+		Cmd:         []string{"fake-agent"},
+		AgentID:     "fake-agent-1",
+		EnvelopeOut: &envOut,
+		AnswerIn:    answers,
+		Stdout:      &mirror,
+		Expiry:      5 * time.Minute,
+		Now:         func() time.Time { return time.Date(2026, 6, 4, 10, 0, 0, 0, time.UTC) },
+		NewID:       func() string { return "FIXED-ID-1" },
+	}
+
+	if err := w.Process(context.Background(), childOut, &childIn); err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if got, want := childIn.String(), "y\n"; got != want {
+		t.Errorf("childIn=%q want=%q — the prompt after the oversized line was not answered", got, want)
+	}
+
+	var env protocol.ApprovalEnvelope
+	if err := json.Unmarshal(envOut.Bytes(), &env); err != nil {
+		t.Fatalf("decode envelope: %v\nraw=%s", err, envOut.String())
+	}
+	if env.ID != "FIXED-ID-1" || env.Prompt != "Allow this command?" {
+		t.Errorf("envelope after oversized line: id=%q prompt=%q", env.ID, env.Prompt)
+	}
+
+	// The mirror truncates the oversized line to maxLineBytes (Fprintln adds
+	// the newline back) and keeps every other line intact.
+	lines := strings.Split(mirror.String(), "\n")
+	if len(lines) < 4 {
+		t.Fatalf("mirror lines=%d, want >=4", len(lines))
+	}
+	if lines[0] != "before" || lines[2] != "Allow this command? [y/N]" {
+		t.Errorf("mirror normal lines altered: %q / %q", lines[0], lines[2])
+	}
+	if got := len(lines[1]); got != maxLineBytes {
+		t.Errorf("oversized mirrored line len=%d want=%d (truncated, not fatal)", got, maxLineBytes)
+	}
+}

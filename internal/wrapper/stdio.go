@@ -219,18 +219,68 @@ func (w *Wrapper) Run(ctx context.Context) error {
 	return waitErr
 }
 
-// Process is the IO loop split out for testing: it scans childOut line
+// maxLineBytes caps how much of ONE stdout line the wrapper keeps for the
+// operator mirror, the matchers, and the rolling context. Lines longer than
+// the cap are consumed and truncated — never fatal. The old bufio.Scanner
+// loop capped the token at 1 MiB and returned bufio.ErrTooLong from
+// Process on a longer line, which killed the whole wrapped session just
+// because the agent echoed one oversized payload (a base64 blob or a
+// minified-JSON dump routinely exceeds 1 MiB on a single line); the triage
+// queue silently lost the agent. (fix-scanner-oversized-line-kills-session)
+const maxLineBytes = 1024 * 1024
+
+// readLine reads one '\n'-terminated line from r. The returned line excludes
+// the trailing '\n' (and a '\r' immediately before it, matching
+// bufio.Scanner's ScanLines) and is truncated to maxLineBytes. A final
+// unterminated line is returned with a nil error; io.EOF is reported only
+// when no bytes remain at all, mirroring Scanner's token/EOF split.
+func readLine(r *bufio.Reader) (string, error) {
+	var buf []byte
+	for {
+		chunk, err := r.ReadSlice('\n')
+		if len(buf) < maxLineBytes {
+			room := maxLineBytes - len(buf)
+			if len(chunk) > room {
+				buf = append(buf, chunk[:room]...)
+			} else {
+				buf = append(buf, chunk...)
+			}
+		} // over the cap: keep consuming so the rest of the line is discarded
+		switch {
+		case err == nil:
+			return trimEOL(string(buf)), nil
+		case errors.Is(err, bufio.ErrBufferFull):
+			continue
+		case errors.Is(err, io.EOF):
+			if len(buf) == 0 {
+				return "", io.EOF
+			}
+			return trimEOL(string(buf)), nil
+		default:
+			return "", err
+		}
+	}
+}
+
+// trimEOL strips one trailing '\n' and an optional preceding '\r', matching
+// bufio.Scanner's ScanLines token semantics.
+func trimEOL(s string) string {
+	s = strings.TrimSuffix(s, "\n")
+	return strings.TrimSuffix(s, "\r")
+}
+
+// Process is the IO loop split out for testing: it reads childOut line
 // by line, fires matchers, emits envelopes, reads answers, and forwards
 // each answer's ChoiceKey to childIn. It returns when childOut hits EOF
-// or ctx is done.
+// or ctx is done. A single line longer than maxLineBytes is truncated and
+// skipped, not fatal (fix-scanner-oversized-line-kills-session).
 func (w *Wrapper) Process(ctx context.Context, childOut io.Reader, childIn io.Writer) error {
 	w.applyDefaults()
 	if w.sessionStarted.IsZero() {
 		w.sessionStarted = w.Now()
 	}
 
-	scanner := bufio.NewScanner(childOut)
-	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+	reader := bufio.NewReaderSize(childOut, 64*1024)
 
 	var answerDec *json.Decoder
 	if w.AnswerIn != nil {
@@ -246,11 +296,17 @@ func (w *Wrapper) Process(ctx context.Context, childOut io.Reader, childIn io.Wr
 		go w.runAnswerReader(answerDec)
 	}
 
-	for scanner.Scan() {
+	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		line := scanner.Text()
+		line, rerr := readLine(reader)
+		if rerr != nil {
+			if errors.Is(rerr, io.EOF) {
+				return nil
+			}
+			return rerr
+		}
 		if _, err := fmt.Fprintln(w.Stdout, line); err != nil {
 			return fmt.Errorf("wrapper: mirror stdout: %w", err)
 		}
@@ -294,7 +350,6 @@ func (w *Wrapper) Process(ctx context.Context, childOut io.Reader, childIn io.Wr
 			return fmt.Errorf("wrapper: forward answer to child: %w", err)
 		}
 	}
-	return scanner.Err()
 }
 
 // decodedAnswer carries the result of one background answerDec.Decode so the
